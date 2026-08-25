@@ -6,6 +6,7 @@ LDLIBS += $(shell pkg-config --libs libibverbs 2>/dev/null || echo -libverbs)
 TARGET := ring_allreduce
 SRC := ring_allreduce.c
 OBJ := $(SRC:.c=.o)
+TEST_TARGET := tests/test_phase1
 
 all: $(TARGET)
 
@@ -15,7 +16,13 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-clean:
-	rm -f $(OBJ) $(TARGET)
+$(TEST_TARGET): tests/test_phase1.c ring_allreduce.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ tests/test_phase1.c $(LDLIBS)
 
-.PHONY: all clean
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+clean:
+	rm -f $(OBJ) $(TARGET) $(TEST_TARGET)
+
+.PHONY: all test clean

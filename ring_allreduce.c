@@ -9,6 +9,11 @@
 
 #include <infiniband/verbs.h>
 
+/* Small initial values for the first local Verbs setup milestone. */
+#define PG_BUFFER_SIZE 4096
+#define PG_CQ_CAPACITY 16
+#define PG_QP_DEPTH 8
+
 /*
  * DATATYPE:
  *  Supported element types for the collective operation.
@@ -50,13 +55,18 @@ typedef struct pg_handle {
     int size;
     int is_connected;
     char *hostname;
+    /* Device objects are created in this order: device -> context -> PD. */
     struct ibv_context *context;
+    struct ibv_device *device;
     struct ibv_pd *pd;
+    /* The CQ is shared by this QP's send and receive operations for now. */
     struct ibv_cq *cq;
     struct ibv_qp *qp;
     struct ibv_mr *mr;
     void *buf;
     size_t buf_size;
+    /* Selected physical port on the opened device. */
+    int ib_port;
 } pg_handle_t;
 
 /*
@@ -142,12 +152,88 @@ static int parse_rank_and_hosts(int argc, char **argv, int *myindex, char ***hos
 }
 
 /*
- * connect_process_group:
- *  Initialize the local process-group handle.
+ * destroy_process_group:
+ *  Release every resource that may have been created for a process group.
  *
- *  This is the bootstrap function that prepares the per-rank state used by the
- *  ring collective. In the final implementation it will also initialize the RDMA
- *  device state, create queue pairs, and exchange metadata with neighbors.
+ * Initialization can fail after any individual step. All fields in pg start
+ * as NULL because the structure is allocated with calloc, so this same helper
+ * can clean up both a complete and a partially initialized process group.
+ * Verbs objects are destroyed before the objects they depend on.
+ */
+static void destroy_process_group(pg_handle_t *pg)
+{
+    if (!pg) {
+        return;
+    }
+
+    if (pg->qp) {
+        ibv_destroy_qp(pg->qp);
+    }
+    if (pg->cq) {
+        ibv_destroy_cq(pg->cq);
+    }
+    if (pg->mr) {
+        ibv_dereg_mr(pg->mr);
+    }
+    if (pg->pd) {
+        ibv_dealloc_pd(pg->pd);
+    }
+    if (pg->context) {
+        ibv_close_device(pg->context);
+    }
+
+    free(pg->buf);
+    free(pg->hostname);
+    free(pg);
+}
+
+/*
+ * find_active_port:
+ *  Find the first physical device port that is currently active.
+ *
+ * A device may expose multiple ports, and a valid device does not guarantee
+ * that every port is usable. The selected port is needed when the QP enters
+ * INIT and will also be used later when connecting the QP to a peer.
+ */
+static int find_active_port(struct ibv_context *context, int *port_num)
+{
+    struct ibv_device_attr device_attr;
+    struct ibv_port_attr port_attr;
+    int port;
+
+    if (ibv_query_device(context, &device_attr) != 0) {
+        fprintf(stderr, "Could not query device attributes\n");
+        return -1;
+    }
+
+    for (port = 1; port <= device_attr.phys_port_cnt; ++port) {
+        if (ibv_query_port(context, (uint8_t)port, &port_attr) == 0 &&
+            port_attr.state == IBV_PORT_ACTIVE) {
+            *port_num = port;
+            return 0;
+        }
+    }
+
+    fprintf(stderr, "No active Verbs port found\n");
+    return -1;
+}
+
+/*
+ * connect_process_group:
+ *  Initialize the local process-group handle and local RDMA resources.
+ *
+ *  Current phase flow:
+ *   1. Allocate the opaque handle and copy the hostname.
+ *   2. Discover and open the first available Verbs device.
+ *   3. Find an active physical port.
+ *   4. Allocate a protection domain and registered communication buffer.
+ *   5. Create a completion queue and a reliable-connected queue pair.
+ *   6. Move the new QP from RESET to INIT.
+ *
+ *  This function does not contact another process yet. The QP remains in INIT
+ *  until a later phase exchanges remote metadata and moves it through RTR and
+ *  RTS. Therefore is_connected currently means that local setup succeeded,
+ *  not that a remote rank is connected.
  *
  *  Parameters:
  *   - servername: the host associated with this rank in the group
@@ -159,36 +245,154 @@ static int parse_rank_and_hosts(int argc, char **argv, int *myindex, char ***hos
  */
 int connect_process_group(char *servername, void **pg_handle)
 {
+    /* Temporary list returned by the Verbs device-discovery API. */
+    struct ibv_device **device_list = NULL;
+    /* Number of entries written into device_list. */
+    int device_count = 0;
+    /* Internal state returned to the caller through pg_handle. */
     pg_handle_t *pg = NULL;
 
+    /* Without this output address there is nowhere to return the new handle. */
     if (!pg_handle) {
         fprintf(stderr, "Invalid process-group handle pointer\n");
         return -1;
     }
 
+    /* calloc gives every resource pointer a known NULL value for cleanup. */
     pg = calloc(1, sizeof(*pg));
     if (!pg) {
         fprintf(stderr, "Could not allocate process-group handle\n");
         return -1;
     }
 
+    /* Rank and group size are placeholders until the topology phase. */
     pg->rank = 0;
     pg->size = 1;
     pg->is_connected = 0;
-    pg->hostname = servername ? strdup(servername) : NULL;
 
-    /*
-     * Exercise 3 skeleton:
-     * - device discovery and Verbs setup will be filled in later
-     * - this stub intentionally keeps the project buildable
-     */
-    pg->context = NULL;
-    pg->pd = NULL;
-    pg->cq = NULL;
-    pg->qp = NULL;
-    pg->mr = NULL;
-    pg->buf = NULL;
-    pg->buf_size = 0;
+    /* Keep an owned hostname copy; the caller retains ownership of its input. */
+    pg->hostname = servername ? strdup(servername) : NULL;
+    if (servername && !pg->hostname) {
+        fprintf(stderr, "Could not copy process-group hostname\n");
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* Ask libibverbs which RDMA devices are visible on this host. */
+    device_list = ibv_get_device_list(&device_count);
+    if (!device_list || device_count == 0) {
+        fprintf(stderr, "No InfiniBand Verbs device found\n");
+        if (device_list) {
+            ibv_free_device_list(device_list);
+        }
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* Device selection is intentionally simple for this first milestone. */
+    pg->device = device_list[0];
+
+    /* The context is the process's active handle for using the device. */
+    pg->context = ibv_open_device(pg->device);
+    if (!pg->context) {
+        fprintf(stderr, "Could not open Verbs device %s\n",
+                ibv_get_device_name(pg->device));
+        ibv_free_device_list(device_list);
+        destroy_process_group(pg);
+        return -1;
+    }
+    /* The opened context remains valid after this temporary list is freed. */
+    ibv_free_device_list(device_list);
+    device_list = NULL;
+
+    if (find_active_port(pg->context, &pg->ib_port) != 0) {
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* The PD groups the QP and memory region under one access boundary. */
+    pg->pd = ibv_alloc_pd(pg->context);
+    if (!pg->pd) {
+        fprintf(stderr, "Could not allocate Verbs protection domain\n");
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* This buffer is a placeholder for future send/receive/chunk buffers. */
+    pg->buf = calloc(1, PG_BUFFER_SIZE);
+    pg->buf_size = PG_BUFFER_SIZE;
+    if (!pg->buf) {
+        fprintf(stderr, "Could not allocate process-group buffer\n");
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* Registration makes the buffer accessible to the RDMA hardware. */
+    pg->mr = ibv_reg_mr(pg->pd, pg->buf, pg->buf_size,
+                        IBV_ACCESS_LOCAL_WRITE |
+                        IBV_ACCESS_REMOTE_WRITE |
+                        IBV_ACCESS_REMOTE_READ);
+    if (!pg->mr) {
+        fprintf(stderr, "Could not register process-group buffer\n");
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* The CQ will report completion of future SEND/RECV/RDMA operations. */
+    pg->cq = ibv_create_cq(pg->context, PG_CQ_CAPACITY, NULL, NULL, 0);
+    if (!pg->cq) {
+        fprintf(stderr, "Could not create process-group completion queue\n");
+        destroy_process_group(pg);
+        return -1;
+    }
+
+    /* Create one RC QP; later phases will connect it to a ring neighbor. */
+    {
+        struct ibv_qp_init_attr qp_attr = {
+            .send_cq = pg->cq,
+            .recv_cq = pg->cq,
+            .cap = {
+                .max_send_wr = PG_QP_DEPTH,
+                .max_recv_wr = PG_QP_DEPTH,
+                .max_send_sge = 1,
+                .max_recv_sge = 1,
+                .max_inline_data = 0
+            },
+            .qp_type = IBV_QPT_RC,
+            .sq_sig_all = 1
+        };
+
+        pg->qp = ibv_create_qp(pg->pd, &qp_attr);
+        if (!pg->qp) {
+            fprintf(stderr, "Could not create process-group queue pair\n");
+            destroy_process_group(pg);
+            return -1;
+        }
+    }
+
+    /* A QP must be in INIT before it can be connected to a remote QP. */
+    {
+        struct ibv_qp_attr qp_attr = {
+            .qp_state = IBV_QPS_INIT,
+            .pkey_index = 0,
+            .port_num = (uint8_t)pg->ib_port,
+            .qp_access_flags = IBV_ACCESS_REMOTE_WRITE |
+                               IBV_ACCESS_REMOTE_READ
+        };
+
+        if (ibv_modify_qp(pg->qp, &qp_attr,
+                          IBV_QP_STATE |
+                          IBV_QP_PKEY_INDEX |
+                          IBV_QP_PORT |
+                          IBV_QP_ACCESS_FLAGS) != 0) {
+            fprintf(stderr, "Could not move process-group queue pair to INIT\n");
+            destroy_process_group(pg);
+            return -1;
+        }
+    }
+
+    /* Only local initialization is complete; remote connection comes later. */
+    pg->is_connected = 1;
 
     *pg_handle = pg;
     return 0;
@@ -251,8 +455,7 @@ int pg_close(void *pg_handle)
         return 0;
     }
 
-    free(pg->hostname);
-    free(pg);
+    destroy_process_group(pg);
     return 0;
 }
 
@@ -310,7 +513,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr, "Exercise 3 process-group skeleton initialized for rank %d\n", myindex >= 0 ? myindex : 0);
+    fprintf(stderr, "Exercise 3 local Verbs state initialized for rank %d\n", myindex >= 0 ? myindex : 0);
 
     free(host_list);
     pg_close(pg_handle);
