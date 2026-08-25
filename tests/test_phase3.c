@@ -72,11 +72,41 @@ static int test_metadata_round_trip(void)
 static int test_invalid_io(void)
 {
     unsigned char byte = 0;
+    pg_metadata_t metadata = {0};
 
+    serialize_metadata(NULL, NULL);
     if (write_full(-1, &byte, sizeof(byte)) != -1 ||
         read_full(-1, &byte, sizeof(byte)) != -1 ||
-        deserialize_metadata(NULL, NULL) != -1) {
+        write_full(1, NULL, sizeof(byte)) != -1 ||
+        read_full(0, NULL, sizeof(byte)) != -1 ||
+        deserialize_metadata(NULL, &metadata) != -1) {
         fprintf(stderr, "invalid bootstrap I/O was accepted\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int test_peer_metadata_validation(void)
+{
+    pg_metadata_t metadata = {
+        .rank = 1,
+        .size = 4,
+        .qpn = 7,
+        .buffer_addr = 0x1000,
+        .rkey = 9
+    };
+
+    if (validate_peer_metadata(&metadata, 1, 4) != 0 ||
+        validate_peer_metadata(&metadata, 0, 4) != -1 ||
+        validate_peer_metadata(&metadata, 1, 3) != -1) {
+        fprintf(stderr, "peer metadata validation returned an unexpected result\n");
+        return -1;
+    }
+
+    metadata.qpn = 0;
+    if (validate_peer_metadata(&metadata, 1, 4) != -1) {
+        fprintf(stderr, "peer metadata accepted an invalid QPN\n");
         return -1;
     }
 
@@ -85,7 +115,8 @@ static int test_invalid_io(void)
 
 int main(void)
 {
-    if (test_metadata_round_trip() != 0 || test_invalid_io() != 0) {
+    if (test_metadata_round_trip() != 0 || test_invalid_io() != 0 ||
+        test_peer_metadata_validation() != 0) {
         return EXIT_FAILURE;
     }
 
