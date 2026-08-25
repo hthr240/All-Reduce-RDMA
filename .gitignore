@@ -1,0 +1,6 @@
+# Keep the repository limited to C sources, the Makefile, and the report.
+*
+!.gitignore
+!*.c
+!Makefile
+!report.txt

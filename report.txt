@@ -1,0 +1,31 @@
+Exercise 3 scaffold and build configuration created.
+
+Status:
+- Makefile configured to use libibverbs through pkg-config or the fallback -libverbs flag.
+- ring_allreduce.c contains the required public API skeleton and a minimal CLI parser.
+- The project is ready for the next phase: real ring topology, metadata exchange, and RDMA collective implementation.
+
+Implementation notes:
+- The goal is to build a ring-based process-group library using RDMA verbs.
+- Each rank communicates with a previous and next neighbor in a logical ring.
+- The public API is intentionally minimal and stable:
+  - connect_process_group(char *servername, void **pg_handle)
+  - pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OPERATION op, void *pg_handle)
+  - pg_close(void *pg_handle)
+- The library must support all-reduce semantics across ranks using a ring algorithm.
+- The initial implementation passes compilation and validates the project structure before adding the actual RDMA collective logic.
+
+Design intent:
+- `pg_handle_t` is the process-group handle and will hold all local and remote metadata needed for ring communication.
+- `DATATYPE` and `OPERATION` are public enums that define supported element types and reduction operations.
+- `main` is responsible for mapping command-line rank and host-list input into a rank-local process-group context.
+- The actual distributed communication logic will be implemented in later phases after the bootstrap and topology are complete.
+
+Next planned phases:
+1. Fill in ring neighbor topology and local Verbs state.
+2. Add TCP bootstrap and remote metadata exchange.
+3. Implement QP setup and connection on the ring.
+4. Add eager Reduce Scatter and All Gather logic.
+5. Add rendezvous and pipelining for large messages.
+6. Validate correctness against a CPU reference.
+7. Benchmark and produce the final report.
