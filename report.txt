@@ -73,3 +73,21 @@ Output and diagnostics
 - stdout is reserved for benchmark or machine-readable result data.
 - Diagnostics, validation failures, and progress messages go to stderr.
 - The final implementation must not print debugging text to stdout.
+
+Phase 1 status: local Verbs foundation
+--------------------------------------
+
+The Phase 1 implementation keeps the public API and Makefile build contract
+unchanged while adding the first local RDMA resources. On initialization it:
+- discovers the first available Verbs device and opens its context;
+- selects an active device port;
+- allocates a protection domain;
+- allocates and registers a communication buffer with local and remote access;
+- creates a completion queue; and
+- creates an RC queue pair and moves it to INIT.
+
+Remote metadata exchange and the RTR/RTS transitions are intentionally deferred
+to the following phases. Cleanup handles partial initialization and releases
+resources in reverse dependency order. A machine without an available Verbs
+device is expected to fail initialization cleanly; compilation remains
+possible wherever the libibverbs headers and library are installed.
