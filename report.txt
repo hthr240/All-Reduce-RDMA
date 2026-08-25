@@ -105,3 +105,18 @@ The host-list order remains the rank order. The command-line path now rejects
 empty host names and duplicate hosts before local setup, and rejects invalid
 rank/size combinations in the topology helper. This phase does not contact
 remote hosts or exchange Verbs metadata; those operations begin in Phase 3.
+
+Phase 3 status: bootstrap protocol foundation
+----------------------------------------------
+
+The first Phase 3 slice defines the metadata exchanged during TCP bootstrap:
+rank, group size, QPN, PSN, LID, GID, registered buffer address, and rkey. The
+metadata is encoded into a fixed 48-byte wire message using network byte order,
+so it does not depend on C structure padding or host endianness. The write_full
+and read_full helpers handle TCP's stream behavior by continuing until the
+entire message has been transferred, retrying interrupted system calls.
+
+The current Phase 3 test validates metadata round trips and fragmented local
+socket transfers. Real connections to previous and next ring neighbors,
+remote metadata storage, and QP transitions from INIT to RTR and RTS remain
+the next Phase 3 sub-milestone.

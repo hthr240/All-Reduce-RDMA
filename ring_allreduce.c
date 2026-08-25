@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,13 @@
 #define PG_BUFFER_SIZE 4096
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8
+#define PG_METADATA_WIRE_SIZE 48
+
+#if defined(__GNUC__)
+#define PG_UNUSED __attribute__((unused))
+#else
+#define PG_UNUSED
+#endif
 
 /*
  * DATATYPE:
@@ -36,6 +44,26 @@ typedef enum {
     PG_MAX = 1,
     PG_MIN = 2
 } OPERATION;
+
+/*
+ * pg_metadata_t:
+ *  The local information a rank will exchange with a peer during bootstrap.
+ *
+ * This is the host-side representation. It is converted to a fixed-size wire
+ * representation before being sent over TCP; the C struct itself is never
+ * sent because compilers may add padding and hosts may use different byte
+ * orderings.
+ */
+typedef struct {
+    uint32_t rank;
+    uint32_t size;
+    uint32_t qpn;
+    uint32_t psn;
+    uint16_t lid;
+    union ibv_gid gid;
+    uint64_t buffer_addr;
+    uint32_t rkey;
+} pg_metadata_t;
 
 /*
  * pg_handle_t:
@@ -70,6 +98,9 @@ typedef struct pg_handle {
     size_t buf_size;
     /* Selected physical port on the opened device. */
     int ib_port;
+    /* Remote metadata will be filled during the TCP bootstrap phase. */
+    pg_metadata_t previous_peer;
+    pg_metadata_t next_peer;
 } pg_handle_t;
 
 /*
@@ -273,6 +304,125 @@ static int configure_process_group_topology(pg_handle_t *pg, int rank, int size)
     pg->size = size;
     pg->previous_rank = (rank + size - 1) % size;
     pg->next_rank = (rank + 1) % size;
+    return 0;
+}
+
+static uint64_t host_to_network_u64(uint64_t value)
+{
+    return ((uint64_t)htonl((uint32_t)(value >> 32)) << 32) |
+           htonl((uint32_t)value);
+}
+
+static uint64_t network_to_host_u64(uint64_t value)
+{
+    return ((uint64_t)ntohl((uint32_t)(value >> 32)) << 32) |
+           ntohl((uint32_t)value);
+}
+
+/*
+ * serialize_metadata / deserialize_metadata:
+ *  Convert bootstrap metadata to and from a 48-byte TCP message.
+ *
+ * Each integer is written in network byte order. Fixed offsets make the wire
+ * format independent of compiler padding and structure alignment.
+ */
+static PG_UNUSED void serialize_metadata(
+    const pg_metadata_t *metadata, unsigned char wire[PG_METADATA_WIRE_SIZE])
+{
+    uint32_t value32;
+    uint64_t value64;
+
+    memset(wire, 0, PG_METADATA_WIRE_SIZE);
+
+    value32 = htonl(metadata->rank);
+    memcpy(wire + 0, &value32, sizeof(value32));
+    value32 = htonl(metadata->size);
+    memcpy(wire + 4, &value32, sizeof(value32));
+    value32 = htonl(metadata->qpn);
+    memcpy(wire + 8, &value32, sizeof(value32));
+    value32 = htonl(metadata->psn);
+    memcpy(wire + 12, &value32, sizeof(value32));
+    value32 = htonl((uint32_t)metadata->lid);
+    memcpy(wire + 16, &value32, sizeof(value32));
+    value64 = host_to_network_u64(metadata->buffer_addr);
+    memcpy(wire + 20, &value64, sizeof(value64));
+    value32 = htonl(metadata->rkey);
+    memcpy(wire + 28, &value32, sizeof(value32));
+    memcpy(wire + 32, metadata->gid.raw, sizeof(metadata->gid.raw));
+}
+
+static PG_UNUSED int deserialize_metadata(
+    const unsigned char wire[PG_METADATA_WIRE_SIZE], pg_metadata_t *metadata)
+{
+    uint32_t value32;
+    uint64_t value64;
+
+    if (!metadata) {
+        return -1;
+    }
+
+    memcpy(&value32, wire + 0, sizeof(value32));
+    metadata->rank = ntohl(value32);
+    memcpy(&value32, wire + 4, sizeof(value32));
+    metadata->size = ntohl(value32);
+    memcpy(&value32, wire + 8, sizeof(value32));
+    metadata->qpn = ntohl(value32);
+    memcpy(&value32, wire + 12, sizeof(value32));
+    metadata->psn = ntohl(value32);
+    memcpy(&value32, wire + 16, sizeof(value32));
+    metadata->lid = (uint16_t)ntohl(value32);
+    memcpy(&value64, wire + 20, sizeof(value64));
+    metadata->buffer_addr = network_to_host_u64(value64);
+    memcpy(&value32, wire + 28, sizeof(value32));
+    metadata->rkey = ntohl(value32);
+    memcpy(metadata->gid.raw, wire + 32, sizeof(metadata->gid.raw));
+    return 0;
+}
+
+/*
+ * write_full / read_full:
+ *  Transfer exactly length bytes over a TCP socket.
+ *
+ * TCP is a byte stream: one write is not guaranteed to match one read. These
+ * helpers continue until the complete message is transferred or an error or
+ * orderly peer close occurs. EINTR is retried because signals may interrupt
+ * system calls without indicating a connection failure.
+ */
+static PG_UNUSED int write_full(int fd, const void *buffer, size_t length)
+{
+    const unsigned char *cursor = buffer;
+    size_t transferred = 0;
+
+    while (transferred < length) {
+        ssize_t result = write(fd, cursor + transferred, length - transferred);
+        if (result < 0 && errno == EINTR) {
+            continue;
+        }
+        if (result <= 0) {
+            return -1;
+        }
+        transferred += (size_t)result;
+    }
+
+    return 0;
+}
+
+static PG_UNUSED int read_full(int fd, void *buffer, size_t length)
+{
+    unsigned char *cursor = buffer;
+    size_t transferred = 0;
+
+    while (transferred < length) {
+        ssize_t result = read(fd, cursor + transferred, length - transferred);
+        if (result < 0 && errno == EINTR) {
+            continue;
+        }
+        if (result <= 0) {
+            return -1;
+        }
+        transferred += (size_t)result;
+    }
+
     return 0;
 }
 
