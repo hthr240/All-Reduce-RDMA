@@ -91,3 +91,17 @@ to the following phases. Cleanup handles partial initialization and releases
 resources in reverse dependency order. A machine without an available Verbs
 device is expected to fail initialization cleanly; compilation remains
 possible wherever the libibverbs headers and library are installed.
+
+Phase 2 status: local ring topology
+------------------------------------
+
+The Phase 2 implementation records the logical ring neighbors in the process-
+group handle. For rank r in a group of size N it computes:
+
+  previous_rank = (r + N - 1) % N
+  next_rank = (r + 1) % N
+
+The host-list order remains the rank order. The command-line path now rejects
+empty host names and duplicate hosts before local setup, and rejects invalid
+rank/size combinations in the topology helper. This phase does not contact
+remote hosts or exchange Verbs metadata; those operations begin in Phase 3.

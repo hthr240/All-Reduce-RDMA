@@ -53,6 +53,9 @@ typedef enum {
 typedef struct pg_handle {
     int rank;
     int size;
+    /* Logical ring neighbors; these are rank numbers, not hostnames. */
+    int previous_rank;
+    int next_rank;
     int is_connected;
     char *hostname;
     /* Device objects are created in this order: device -> context -> PD. */
@@ -216,6 +219,61 @@ static int find_active_port(struct ibv_context *context, int *port_num)
 
     fprintf(stderr, "No active Verbs port found\n");
     return -1;
+}
+
+/*
+ * validate_host_list:
+ *  Check the host list before it is used to define the process-group layout.
+ *
+ *  The list order is significant: list[i] identifies rank i. Every host must
+ *  be non-empty and appear only once so that all ranks can agree on one ring.
+ */
+static int validate_host_list(char **host_list, int host_count)
+{
+    int i;
+    int j;
+
+    if (!host_list || host_count <= 0) {
+        fprintf(stderr, "Process-group host list is empty\n");
+        return -1;
+    }
+
+    for (i = 0; i < host_count; ++i) {
+        if (!host_list[i] || host_list[i][0] == '\0') {
+            fprintf(stderr, "Process-group host list contains an empty host\n");
+            return -1;
+        }
+        for (j = i + 1; j < host_count; ++j) {
+            if (strcmp(host_list[i], host_list[j]) == 0) {
+                fprintf(stderr, "Process-group host list contains a duplicate host\n");
+                return -1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * configure_process_group_topology:
+ *  Store a rank's position in the logical ring and calculate its neighbors.
+ *
+ *  The modulo operation makes the ring wrap around: rank 0 receives from the
+ *  last rank, and the last rank sends to rank 0. This function only configures
+ *  local metadata; it does not open sockets or communicate with peers.
+ */
+static int configure_process_group_topology(pg_handle_t *pg, int rank, int size)
+{
+    if (!pg || rank < 0 || size <= 0 || rank >= size) {
+        fprintf(stderr, "Invalid process-group topology\n");
+        return -1;
+    }
+
+    pg->rank = rank;
+    pg->size = size;
+    pg->previous_rank = (rank + size - 1) % size;
+    pg->next_rank = (rank + 1) % size;
+    return 0;
 }
 
 /*
@@ -491,13 +549,19 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Distributed mode: validate the complete rank-to-host mapping first. */
     if (myindex >= 0 && host_count > 0) {
+        if (validate_host_list(host_list, host_count) != 0) {
+            free(host_list);
+            return 1;
+        }
         if (myindex >= host_count) {
             fprintf(stderr, "-myindex is out of range for the supplied -list\n");
             free(host_list);
             return 1;
         }
         hostname = host_list[myindex];
+    /* Standalone mode represents a one-rank group for local development. */
     } else if (argc == 2) {
         hostname = argv[1];
     } else {
@@ -506,6 +570,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Create local RDMA state before adding the ring metadata to the handle. */
     rc = connect_process_group(hostname, &pg_handle);
     if (rc != 0) {
         fprintf(stderr, "Failed to initialize process group\n");
@@ -513,7 +578,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr, "Exercise 3 local Verbs state initialized for rank %d\n", myindex >= 0 ? myindex : 0);
+    /* The host-list rank and size now become part of the opaque handle. */
+    if (configure_process_group_topology((pg_handle_t *)pg_handle,
+                                         myindex >= 0 ? myindex : 0,
+                                         myindex >= 0 ? host_count : 1) != 0) {
+        pg_close(pg_handle);
+        free(host_list);
+        return 1;
+    }
+
+    fprintf(stderr, "Exercise 3 local Verbs state initialized for rank %d\n",
+            ((pg_handle_t *)pg_handle)->rank);
 
     free(host_list);
     pg_close(pg_handle);
