@@ -29,3 +29,47 @@ Next planned phases:
 5. Add rendezvous and pipelining for large messages.
 6. Validate correctness against a CPU reference.
 7. Benchmark and produce the final report.
+
+Phase 0 requirements lock
+-------------------------
+
+Public API
+- connect_process_group(char *servername, void **pg_handle) creates the local
+  process-group handle. The handle is opaque to the caller.
+- pg_all_reduce(sendbuf, recvbuf, count, datatype, op, pg_handle) performs an
+  element-wise all-reduce and writes the complete result to recvbuf on every
+  rank. The call returns 0 on success and -1 on failure.
+- pg_close(pg_handle) releases all resources owned by the handle. It is safe to
+  call it with NULL.
+
+Supported values
+- DATATYPE values are PG_INT32, PG_INT64, PG_FLOAT, and PG_DOUBLE.
+- OPERATION values are PG_SUM, PG_MAX, and PG_MIN.
+- Unsupported datatype or operation values are rejected with a nonzero result.
+
+Process-group and command line
+- Ranks are zero-based: rank 0 is the first host in the -list argument.
+- The distributed form is:
+  ./ring_allreduce -myindex <rank> -list <host1> [host2 ...]
+- The standalone form accepts one hostname and is used for local bootstrap
+  development.
+- The rank must be within the supplied host list. The host list order is the
+  logical ring order and must be identical at every rank.
+
+Buffer and count semantics
+- sendbuf points to count input elements and recvbuf points to count output
+  elements. The caller owns both buffers and keeps them valid for the duration
+  of pg_all_reduce.
+- sendbuf and recvbuf may refer to the same storage; the implementation must
+  preserve the input values while building the result.
+- count must be nonnegative. count == 0 is a successful no-op when the handle
+  and buffer arguments are otherwise valid.
+- Counts do not need to divide evenly by the number of ranks. The collective
+  must preserve element order and handle the remainder explicitly.
+- The implementation must not retain caller buffer addresses after
+  pg_all_reduce returns.
+
+Output and diagnostics
+- stdout is reserved for benchmark or machine-readable result data.
+- Diagnostics, validation failures, and progress messages go to stderr.
+- The final implementation must not print debugging text to stdout.
