@@ -4,3 +4,6 @@
 !*.c
 !Makefile
 !report.txt
+!tests/
+tests/*
+!tests/*.c
