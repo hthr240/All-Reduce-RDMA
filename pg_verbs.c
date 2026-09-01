@@ -6,6 +6,7 @@
 #include <infiniband/verbs.h>
 
 #include "pg_common.h"
+#include "pg_log.h"
 #include "pg_verbs.h"
 
 int find_active_port(struct ibv_context *context, int *port_num)
@@ -37,72 +38,88 @@ int create_rdma_resources(pg_handle_t *pg)
     int device_count = 0;
 
     if (!pg) {
-        fprintf(stderr, "Invalid process-group handle\n");
+        PG_LOG_ERROR("pg_verbs", "Invalid process-group handle");
         return -1;
     }
 
     /* Ask libibverbs which RDMA devices are visible on this host. */
+    PG_LOG_DEBUG("pg_verbs", "Discovering RDMA devices");
     device_list = ibv_get_device_list(&device_count);
     if (!device_list || device_count == 0) {
-        fprintf(stderr, "No InfiniBand Verbs device found\n");
+        PG_LOG_ERROR("pg_verbs", "No InfiniBand Verbs device found");
         if (device_list) {
             ibv_free_device_list(device_list);
         }
         return -1;
     }
+    PG_LOG_INFO("pg_verbs", "Found %d RDMA device(s)", device_count);
 
     /* Device selection is intentionally simple for this first milestone. */
     pg->device = device_list[0];
+    PG_LOG_DEBUG("pg_verbs", "Selected device: %s", ibv_get_device_name(pg->device));
 
     /* The context is the process's active handle for using the device. */
     pg->context = ibv_open_device(pg->device);
     if (!pg->context) {
-        fprintf(stderr, "Could not open Verbs device %s\n",
-                ibv_get_device_name(pg->device));
+        PG_LOG_ERROR("pg_verbs", "Could not open Verbs device %s", ibv_get_device_name(pg->device));
         ibv_free_device_list(device_list);
         return -1;
     }
+    PG_LOG_DEBUG("pg_verbs", "Device context opened successfully");
     /* The opened context remains valid after this temporary list is freed. */
     ibv_free_device_list(device_list);
     device_list = NULL;
 
+    PG_LOG_DEBUG("pg_verbs", "Finding active port");
     if (find_active_port(pg->context, &pg->ib_port) != 0) {
+        PG_LOG_ERROR("pg_verbs", "Could not find active port");
         return -1;
     }
+    PG_LOG_INFO("pg_verbs", "Active port found: %d", pg->ib_port);
 
     /* The PD groups the QP and memory region under one access boundary. */
+    PG_LOG_DEBUG("pg_verbs", "Allocating protection domain");
     pg->pd = ibv_alloc_pd(pg->context);
     if (!pg->pd) {
-        fprintf(stderr, "Could not allocate Verbs protection domain\n");
+        PG_LOG_ERROR("pg_verbs", "Could not allocate Verbs protection domain");
         return -1;
     }
+    PG_LOG_DEBUG("pg_verbs", "Protection domain allocated");
 
     /* This buffer is a placeholder for future send/receive/chunk buffers. */
+    PG_LOG_DEBUG("pg_verbs", "Allocating %zu byte buffer", (size_t)PG_BUFFER_SIZE);
     pg->buf = calloc(1, PG_BUFFER_SIZE);
     pg->buf_size = PG_BUFFER_SIZE;
     if (!pg->buf) {
-        fprintf(stderr, "Could not allocate process-group buffer\n");
+        PG_LOG_ERROR("pg_verbs", "Could not allocate process-group buffer");
         return -1;
     }
+    PG_LOG_DEBUG("pg_verbs", "Buffer allocated at %p", pg->buf);
 
     /* Registration makes the buffer accessible to the RDMA hardware. */
+    PG_LOG_DEBUG("pg_verbs", "Registering memory region");
     pg->mr = ibv_reg_mr(pg->pd, pg->buf, pg->buf_size,
                         IBV_ACCESS_LOCAL_WRITE |
                         IBV_ACCESS_REMOTE_WRITE |
                         IBV_ACCESS_REMOTE_READ);
     if (!pg->mr) {
-        fprintf(stderr, "Could not register process-group buffer\n");
+        PG_LOG_ERROR("pg_verbs", "Could not register process-group buffer");
         return -1;
     }
+    PG_LOG_INFO("pg_verbs", "Memory region registered: rkey=0x%x, lkey=0x%x",
+                pg->mr->rkey, pg->mr->lkey);
 
     /* The CQ will report completion of future SEND/RECV/RDMA operations. */
+    PG_LOG_DEBUG("pg_verbs", "Creating completion queue (capacity=%d)", PG_CQ_CAPACITY);
     pg->cq = ibv_create_cq(pg->context, PG_CQ_CAPACITY, NULL, NULL, 0);
     if (!pg->cq) {
-        fprintf(stderr, "Could not create process-group completion queue\n");
+        PG_LOG_ERROR("pg_verbs", "Could not create process-group completion queue");
         return -1;
     }
+    PG_LOG_DEBUG("pg_verbs", "Completion queue created");
 
     /* Create one RC QP; later phases will connect it to a ring neighbor. */
+    PG_LOG_DEBUG("pg_verbs", "Creating reliable-connected queue pair");
     {
         struct ibv_qp_init_attr qp_attr = {
             .send_cq = pg->cq,
@@ -120,12 +137,14 @@ int create_rdma_resources(pg_handle_t *pg)
 
         pg->qp = ibv_create_qp(pg->pd, &qp_attr);
         if (!pg->qp) {
-            fprintf(stderr, "Could not create process-group queue pair\n");
+            PG_LOG_ERROR("pg_verbs", "Could not create process-group queue pair");
             return -1;
         }
+        PG_LOG_INFO("pg_verbs", "Queue pair created: qp_num=0x%x", pg->qp->qp_num);
     }
 
     /* A QP must be in INIT before it can be connected to a remote QP. */
+    PG_LOG_DEBUG("pg_verbs", "Moving QP to INIT state");
     {
         struct ibv_qp_attr qp_attr = {
             .qp_state = IBV_QPS_INIT,
@@ -140,11 +159,13 @@ int create_rdma_resources(pg_handle_t *pg)
                           IBV_QP_PKEY_INDEX |
                           IBV_QP_PORT |
                           IBV_QP_ACCESS_FLAGS) != 0) {
-            fprintf(stderr, "Could not move process-group queue pair to INIT\n");
+            PG_LOG_ERROR("pg_verbs", "Could not move process-group queue pair to INIT");
             return -1;
         }
+        PG_LOG_INFO("pg_verbs", "QP moved to INIT state successfully");
     }
 
+    PG_LOG_INFO("pg_verbs", "All RDMA resources created successfully");
     return 0;
 }
 

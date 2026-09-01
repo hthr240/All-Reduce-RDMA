@@ -4,7 +4,7 @@ CPPFLAGS += $(shell pkg-config --cflags libibverbs 2>/dev/null)
 LDLIBS += $(shell pkg-config --libs libibverbs 2>/dev/null || echo -libverbs)
 
 TARGET := ring_allreduce
-SRC := ring_allreduce.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c
+SRC := ring_allreduce.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c
 OBJ := $(SRC:.c=.o)
 TEST_SOURCES := $(wildcard tests/test_phase*.c)
 TEST_TARGETS := $(TEST_SOURCES:.c=)
@@ -19,8 +19,8 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-tests/test_phase%: tests/test_phase%.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c $(LDLIBS)
+tests/test_phase%: tests/test_phase%.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c $(LDLIBS)
 
 test: $(TEST_TARGETS)
 	@set -e; for test_target in $(TEST_TARGETS); do \
