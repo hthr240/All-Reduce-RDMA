@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 static int metadata_equal(const pg_metadata_t *left, const pg_metadata_t *right)
 {

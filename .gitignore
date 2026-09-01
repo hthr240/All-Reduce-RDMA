@@ -1,9 +1,11 @@
-# Keep the repository limited to C sources, the Makefile, and the report.
+# Keep the repository limited to C sources, headers, the Makefile, and the report.
 *
 !.gitignore
 !*.c
+!*.h
 !Makefile
 !report.txt
+!REFACTORING.md
 !tests/
 tests/*
 !tests/*.c
