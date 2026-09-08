@@ -9,6 +9,8 @@
 #include "pg_log.h"
 #include "pg_verbs.h"
 #include "pg_bootstrap.h"
+#include "pg_collective.h"
+#include "pg_reduction.h"
 #include "pg_topology.h"
 #include "pg_cli.h"
 
@@ -150,6 +152,52 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 
     fprintf(stderr, "pg_all_reduce not implemented in the skeleton build\n");
     return -1;
+}
+
+int pg_chunk(void *pg_handle, int count, int *offset, int *nelem)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    int chunk;
+
+    if (!pg || count < 0 || !offset || !nelem || pg->size <= 0) {
+        return -1;
+    }
+    chunk = (pg->rank + 1) % pg->size;
+    *offset = pg_chunk_offset(count, pg->size, chunk);
+    *nelem = pg_chunk_nelem(count, pg->size, chunk);
+    return *offset < 0 || *nelem < 0 ? -1 : 0;
+}
+
+int pg_rank(void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    return pg ? pg->rank : -1;
+}
+
+int pg_nranks(void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    return pg ? pg->size : -1;
+}
+
+int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
+                      DATATYPE datatype, OPERATION op, void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    if (!pg || count < 0 || pg_validate_reduction(datatype, op) != 0) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+    if (!sendbuf || !recvbuf) {
+        return -1;
+    }
+    return pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                       datatype, op);
 }
 
 /* Phase 4 connectivity smoke test; collective data movement comes later. */

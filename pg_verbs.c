@@ -314,6 +314,73 @@ int ring_token(pg_handle_t *pg, int laps)
     return 0;
 }
 
+int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id)
+{
+    struct ibv_sge sge;
+    struct ibv_recv_wr wr;
+    struct ibv_recv_wr *bad_wr = NULL;
+
+    if (!pg || !pg->qp_recv || !pg->mr || !pg->buf ||
+        length > PG_EAGER_BUFFER_SIZE) {
+        return -1;
+    }
+
+    memset(&sge, 0, sizeof(sge));
+    sge.addr = (uintptr_t)((unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE);
+    sge.length = PG_EAGER_BUFFER_SIZE;
+    sge.lkey = pg->mr->lkey;
+    memset(&wr, 0, sizeof(wr));
+    wr.wr_id = work_id;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    return ibv_post_recv(pg->qp_recv, &wr, &bad_wr) == 0 ? 0 : -1;
+}
+
+int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
+                    uint32_t immediate, uint64_t work_id)
+{
+    struct ibv_sge sge;
+    struct ibv_send_wr wr;
+    struct ibv_send_wr *bad_wr = NULL;
+
+    if (!pg || !pg->qp_send || !pg->mr || !buffer ||
+        length > PG_WORK_BUFFER_SIZE) {
+        return -1;
+    }
+
+    memset(&sge, 0, sizeof(sge));
+    sge.addr = (uintptr_t)buffer;
+    sge.length = (uint32_t)length;
+    sge.lkey = pg->mr->lkey;
+    memset(&wr, 0, sizeof(wr));
+    wr.wr_id = work_id;
+    wr.sg_list = &sge;
+    wr.num_sge = length == 0 ? 0 : 1;
+    wr.opcode = IBV_WR_SEND_WITH_IMM;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.imm_data = immediate;
+    if (length <= 256) {
+        wr.send_flags |= IBV_SEND_INLINE;
+    }
+    return ibv_post_send(pg->qp_send, &wr, &bad_wr) == 0 ? 0 : -1;
+}
+
+int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc)
+{
+    struct ibv_cq *cq;
+    int count;
+
+    if (!pg || !wc) {
+        return -1;
+    }
+    cq = receive ? pg->recv_cq : pg->send_cq;
+    if (!cq) {
+        return -1;
+    }
+    count = ibv_poll_cq(cq, 1, wc);
+    return count < 0 ? -1 : count;
+}
+
 void destroy_rdma_resources(pg_handle_t *pg)
 {
     if (!pg) {

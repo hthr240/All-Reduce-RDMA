@@ -81,3 +81,19 @@ int pg_reduce(void *dst, const void *src, int count,
     }
     return 0;
 }
+
+int pg_send_chunk(int rank, int step, int nranks)
+{
+    if (nranks <= 0 || rank < 0 || rank >= nranks || step < 0) {
+        return -1;
+    }
+    return ((rank - step) % nranks + nranks) % nranks;
+}
+
+int pg_receive_chunk(int rank, int step, int nranks)
+{
+    if (nranks <= 0 || rank < 0 || rank >= nranks || step < 0) {
+        return -1;
+    }
+    return ((rank - step - 1) % nranks + nranks) % nranks;
+}

@@ -141,3 +141,21 @@ element sizes, validation, uneven chunk lengths, chunk offsets, and in-place
 element-wise reduction. test_phase5 covers int32 and double SUM/PROD cases,
 uneven counts, empty chunks, and invalid arguments. RDMA Reduce Scatter and
 All Gather are not part of this phase yet.
+
+The next implementation phase is eager collectives. It is split into
+registered workspace and receive-pool setup, SEND_WITH_IMM transport helpers,
+N - 1 Reduce Scatter rounds, and N - 1 All Gather rounds. The eager path will
+be limited to bounded chunks first; rendezvous RDMA writes and pipelining will
+follow only after eager correctness is established.
+
+Phase 6 status: bounded eager Reduce Scatter
+----------------------------------------------
+
+The Phase 6 slice expands the registered buffer into local work space and an
+eager receive area, adds SEND_WITH_IMM posting and split-CQ polling helpers,
+and adds the reference ring schedule for send and receive chunks. The public
+Reduce Scatter entry point copies caller input into registered memory, runs
+N - 1 eager rounds, validates immediate data and byte lengths, reduces received
+chunks with pg_reduce(), and returns this rank's owned reduced chunk. Phase 6
+tests cover schedule geometry, public chunk ownership, and invalid transport
+arguments. Full All Gather and end-to-end All Reduce remain the next slice.

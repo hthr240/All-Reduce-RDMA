@@ -94,10 +94,27 @@ static int test_validation(void)
     return 0;
 }
 
+static int test_ring_schedule(void)
+{
+    const int expected_send[] = {0, 3, 2, 1};
+    const int expected_receive[] = {3, 2, 1, 0};
+    int step;
+
+    for (step = 0; step < 4; ++step) {
+        if (pg_send_chunk(0, step, 4) != expected_send[step] ||
+            pg_receive_chunk(0, step, 4) != expected_receive[step]) {
+            fprintf(stderr, "ring chunk schedule is incorrect\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_chunking() != 0 || test_int32_reduction() != 0 ||
-        test_double_reduction() != 0 || test_validation() != 0) {
+        test_double_reduction() != 0 || test_validation() != 0 ||
+        test_ring_schedule() != 0) {
         fprintf(stderr, "Phase 5 reduction tests failed\n");
         return EXIT_FAILURE;
     }

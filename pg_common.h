@@ -90,7 +90,9 @@ typedef struct pg_handle {
 } pg_handle_t;
 
 /* Small initial values for the first local Verbs setup milestone. */
-#define PG_BUFFER_SIZE 4096
+#define PG_WORK_BUFFER_SIZE 32768
+#define PG_EAGER_BUFFER_SIZE 4096
+#define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8
 #define PG_METADATA_WIRE_SIZE 48

@@ -38,6 +38,12 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
 /* Circulate a one-byte token around the connected ring. */
 int ring_token(pg_handle_t *pg, int laps);
 
+/* Eager transport primitives used by the Reduce Scatter phase. */
+int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id);
+int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
+					uint32_t immediate, uint64_t work_id);
+int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc);
+
 /*
  * destroy_rdma_resources:
  *  Release every Verbs resource owned by a process group.

@@ -19,4 +19,8 @@ int pg_chunk_offset(int count, int nranks, int chunk);
 int pg_reduce(void *dst, const void *src, int count,
               DATATYPE datatype, OPERATION operation);
 
+/* Ring schedule helpers shared by eager and rendezvous collectives. */
+int pg_send_chunk(int rank, int step, int nranks);
+int pg_receive_chunk(int rank, int step, int nranks);
+
 #endif /* PG_REDUCTION_H */

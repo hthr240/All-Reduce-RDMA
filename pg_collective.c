@@ -1,0 +1,112 @@
+#include <string.h>
+
+#include "pg_collective.h"
+#include "pg_reduction.h"
+#include "pg_verbs.h"
+
+#define PG_EAGER_IMM(seq, step, chunk) \
+    ((((uint32_t)(seq) & 0xffu) << 24) | \
+     (((uint32_t)(step) & 0xffu) << 16) | \
+     ((uint32_t)(chunk) & 0xffffu))
+
+static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
+                                size_t expected_bytes)
+{
+    struct ibv_wc recv_wc;
+    struct ibv_wc send_wc;
+    int got_recv = 0;
+    int got_send = 0;
+
+    while (!got_recv || !got_send) {
+        int count;
+
+        if (!got_recv) {
+            count = poll_eager_completion(pg, 1, &recv_wc);
+            if (count < 0) {
+                return -1;
+            }
+            if (count == 1) {
+                if (recv_wc.status != IBV_WC_SUCCESS ||
+                    recv_wc.opcode != IBV_WC_RECV ||
+                    recv_wc.imm_data != expected_imm ||
+                    recv_wc.byte_len != expected_bytes) {
+                    return -1;
+                }
+                got_recv = 1;
+            }
+        }
+
+        if (!got_send) {
+            count = poll_eager_completion(pg, 0, &send_wc);
+            if (count < 0) {
+                return -1;
+            }
+            if (count == 1) {
+                if (send_wc.status != IBV_WC_SUCCESS) {
+                    return -1;
+                }
+                got_send = 1;
+            }
+        }
+    }
+    return 0;
+}
+
+int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
+                                void *recvbuf, int count,
+                                DATATYPE datatype, OPERATION operation)
+{
+    size_t element_size;
+    size_t total_bytes;
+    int step;
+
+    if (!pg || !pg->is_connected || !sendbuf || !recvbuf || count < 0 ||
+        pg_validate_reduction(datatype, operation) != 0 || pg->size < 2) {
+        return -1;
+    }
+    element_size = pg_datatype_size(datatype);
+    total_bytes = (size_t)count * element_size;
+    if (total_bytes > PG_WORK_BUFFER_SIZE) {
+        return -1;
+    }
+    memcpy(pg->buf, sendbuf, total_bytes);
+
+    for (step = 0; step < pg->size - 1; ++step) {
+        int send_chunk = pg_send_chunk(pg->rank, step, pg->size);
+        int receive_chunk = pg_receive_chunk(pg->rank, step, pg->size);
+        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
+        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
+        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
+        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
+        size_t receive_bytes = (size_t)receive_count * element_size;
+        size_t send_bytes = (size_t)send_count * element_size;
+
+        if (receive_count < 0 || send_count < 0 ||
+            post_eager_receive(pg, receive_bytes, (uint64_t)step) != 0 ||
+            post_eager_send(pg,
+                            (unsigned char *)pg->buf +
+                                (size_t)send_offset * element_size,
+                            send_bytes,
+                            PG_EAGER_IMM(0, step, send_chunk),
+                            (uint64_t)step) != 0 ||
+            wait_for_eager_round(pg,
+                                 PG_EAGER_IMM(0, step, receive_chunk),
+                                 receive_bytes) != 0 ||
+            pg_reduce((unsigned char *)pg->buf +
+                          (size_t)receive_offset * element_size,
+                      (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
+                      receive_count, datatype, operation) != 0) {
+            return -1;
+        }
+    }
+
+    {
+        int owned_chunk = (pg->rank + 1) % pg->size;
+        int owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
+        int owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
+        memcpy(recvbuf, (unsigned char *)pg->buf +
+                              (size_t)owned_offset * element_size,
+               (size_t)owned_count * element_size);
+    }
+    return 0;
+}
