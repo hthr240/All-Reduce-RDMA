@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "pg_common.h"
 #include "pg_log.h"
@@ -24,6 +26,15 @@ static void destroy_process_group(pg_handle_t *pg)
         return;
     }
 
+    if (pg->is_connected && pg->sock_previous >= 0 && pg->sock_next >= 0) {
+        (void)bootstrap_ring_barrier(pg);
+    }
+    if (pg->sock_previous >= 0) {
+        close(pg->sock_previous);
+    }
+    if (pg->sock_next >= 0) {
+        close(pg->sock_next);
+    }
     destroy_rdma_resources(pg);
     free(pg->hostname);
     free(pg);
@@ -75,6 +86,8 @@ int connect_process_group(char *servername, void **pg_handle)
     pg->rank = 0;
     pg->size = 1;
     pg->is_connected = 0;
+    pg->sock_previous = -1;
+    pg->sock_next = -1;
 
     /* Keep an owned hostname copy; the caller retains ownership of its input. */
     pg->hostname = servername ? strdup(servername) : NULL;
@@ -139,6 +152,23 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
     return -1;
 }
 
+/* Phase 4 connectivity smoke test; collective data movement comes later. */
+int pg_ring_token(void *pg_handle, int laps)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    if (!pg || !pg->is_connected) {
+        fprintf(stderr, "Invalid or disconnected process-group handle\n");
+        return -1;
+    }
+    if (pg->sock_previous >= 0 && pg->sock_next >= 0 &&
+        bootstrap_ring_barrier(pg) != 0) {
+        fprintf(stderr, "Ring token setup barrier failed\n");
+        return -1;
+    }
+    return ring_token(pg, laps);
+}
+
 /*
  * pg_close:
  *  Release the process-group handle and any associated local resources.
@@ -178,8 +208,15 @@ int main(int argc, char **argv)
     char *hostname = NULL;
     void *pg_handle = NULL;
     int rc;
+    int run_token = 0;
 
     PG_LOG_INFO("main", "Starting ring_allreduce (argc=%d)", argc);
+
+    for (rc = 1; rc < argc; ++rc) {
+        if (strcmp(argv[rc], "-token") == 0) {
+            run_token = 1;
+        }
+    }
 
     if (argc < 2) {
         PG_LOG_ERROR("main", "Insufficient arguments");
@@ -255,6 +292,15 @@ int main(int argc, char **argv)
         PG_LOG_INFO("main", "Ring bootstrap completed successfully");
     } else {
         PG_LOG_INFO("main", "Standalone or single-rank mode - skipping bootstrap");
+    }
+
+    if (run_token) {
+        PG_LOG_INFO("main", "Running ring token smoke test");
+        rc = pg_ring_token(pg_handle, 1);
+        PG_LOG_INFO("main", "Ring token smoke test %s", rc == 0 ? "passed" : "failed");
+        free(host_list);
+        pg_close(pg_handle);
+        return rc == 0 ? 0 : 1;
     }
 
     PG_LOG_INFO("main", "Exercise 3 local Verbs state initialized for rank %d",

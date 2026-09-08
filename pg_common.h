@@ -73,7 +73,12 @@ typedef struct pg_handle {
     struct ibv_context *context;
     struct ibv_device *device;
     struct ibv_pd *pd;
-    /* The CQ is shared by this QP's send and receive operations for now. */
+    /* Directional transport resources. */
+    struct ibv_cq *send_cq;
+    struct ibv_cq *recv_cq;
+    struct ibv_qp *qp_send;
+    struct ibv_qp *qp_recv;
+    /* Compatibility aliases retained for the phase 1 API/tests. */
     struct ibv_cq *cq;
     struct ibv_qp *qp;
     struct ibv_mr *mr;
@@ -84,6 +89,9 @@ typedef struct pg_handle {
     /* Remote metadata will be filled during the TCP bootstrap phase. */
     pg_metadata_t previous_peer;
     pg_metadata_t next_peer;
+    /* Bootstrap sockets remain open for transport barriers and shutdown. */
+    int sock_previous;
+    int sock_next;
 } pg_handle_t;
 
 /* Small initial values for the first local Verbs setup milestone. */

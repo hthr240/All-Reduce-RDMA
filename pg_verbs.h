@@ -31,6 +31,13 @@ int find_active_port(struct ibv_context *context, int *port_num);
  */
 int create_rdma_resources(pg_handle_t *pg);
 
+/* Connect one local INIT QP to a remote endpoint and move it to RTS. */
+int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
+					uint32_t local_psn, const pg_metadata_t *remote);
+
+/* Circulate a one-byte token around the connected ring. */
+int ring_token(pg_handle_t *pg, int laps);
+
 /*
  * destroy_rdma_resources:
  *  Release every Verbs resource owned by a process group.
