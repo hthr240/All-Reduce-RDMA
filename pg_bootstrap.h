@@ -35,6 +35,10 @@ int read_full(int fd, void *buffer, size_t length);
  */
 int metadata_from_process_group(const pg_handle_t *pg, pg_metadata_t *metadata);
 
+/* Extract endpoint metadata for a specific directional QP. */
+int metadata_from_qp(const pg_handle_t *pg, struct ibv_qp *qp,
+                     uint32_t psn, pg_metadata_t *metadata);
+
 /*
  * validate_peer_metadata:
  *  Check that received peer metadata has expected rank and group size.
@@ -52,5 +56,8 @@ int validate_peer_metadata(const pg_metadata_t *metadata,
  * to flow in both directions on one full-duplex socket.
  */
 int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count);
+
+/* Synchronize all ranks after setup and before resource teardown. */
+int bootstrap_ring_barrier(pg_handle_t *pg);
 
 #endif /* PG_BOOTSTRAP_H */

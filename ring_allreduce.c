@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "pg_common.h"
 #include "pg_log.h"
@@ -24,6 +25,15 @@ static void destroy_process_group(pg_handle_t *pg)
         return;
     }
 
+    if (pg->is_connected && pg->sock_previous >= 0 && pg->sock_next >= 0) {
+        (void)bootstrap_ring_barrier(pg);
+    }
+    if (pg->sock_previous >= 0) {
+        close(pg->sock_previous);
+    }
+    if (pg->sock_next >= 0) {
+        close(pg->sock_next);
+    }
     destroy_rdma_resources(pg);
     free(pg->hostname);
     free(pg);
@@ -75,6 +85,8 @@ int connect_process_group(char *servername, void **pg_handle)
     pg->rank = 0;
     pg->size = 1;
     pg->is_connected = 0;
+    pg->sock_previous = -1;
+    pg->sock_next = -1;
 
     /* Keep an owned hostname copy; the caller retains ownership of its input. */
     pg->hostname = servername ? strdup(servername) : NULL;
@@ -137,6 +149,23 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 
     fprintf(stderr, "pg_all_reduce not implemented in the skeleton build\n");
     return -1;
+}
+
+/* Phase 4 connectivity smoke test; collective data movement comes later. */
+int pg_ring_token(void *pg_handle, int laps)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    if (!pg || !pg->is_connected) {
+        fprintf(stderr, "Invalid or disconnected process-group handle\n");
+        return -1;
+    }
+    if (pg->sock_previous >= 0 && pg->sock_next >= 0 &&
+        bootstrap_ring_barrier(pg) != 0) {
+        fprintf(stderr, "Ring token setup barrier failed\n");
+        return -1;
+    }
+    return ring_token(pg, laps);
 }
 
 /*

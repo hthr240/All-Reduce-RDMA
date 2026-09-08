@@ -13,6 +13,7 @@
 
 #include "pg_common.h"
 #include "pg_bootstrap.h"
+#include "pg_verbs.h"
 
 static uint64_t host_to_network_u64(uint64_t value)
 {
@@ -129,9 +130,16 @@ int read_full(int fd, void *buffer, size_t length)
 
 int metadata_from_process_group(const pg_handle_t *pg, pg_metadata_t *metadata)
 {
+    return metadata_from_qp(pg, pg ? pg->qp_send : NULL,
+                            (uint32_t)(rand() & 0x00ffffff), metadata);
+}
+
+int metadata_from_qp(const pg_handle_t *pg, struct ibv_qp *qp,
+                     uint32_t psn, pg_metadata_t *metadata)
+{
     struct ibv_port_attr port_attr;
 
-    if (!pg || !metadata || !pg->context || !pg->qp || !pg->mr) {
+    if (!pg || !metadata || !pg->context || !qp || !pg->mr) {
         return -1;
     }
     memset(metadata, 0, sizeof(*metadata));
@@ -142,8 +150,8 @@ int metadata_from_process_group(const pg_handle_t *pg, pg_metadata_t *metadata)
 
     metadata->rank = (uint32_t)pg->rank;
     metadata->size = (uint32_t)pg->size;
-    metadata->qpn = pg->qp->qp_num;
-    metadata->psn = (uint32_t)(rand() & 0x00ffffff);
+    metadata->qpn = qp->qp_num;
+    metadata->psn = psn & 0x00ffffffu;
     metadata->lid = port_attr.lid;
     metadata->buffer_addr = (uint64_t)(uintptr_t)pg->buf;
     metadata->rkey = pg->mr->rkey;
@@ -286,6 +294,29 @@ static int receive_peer_metadata(int fd, pg_metadata_t *remote)
     return 0;
 }
 
+int bootstrap_ring_barrier(pg_handle_t *pg)
+{
+    unsigned char token = 0x42;
+    int lap;
+
+    if (!pg || pg->sock_previous < 0 || pg->sock_next < 0) {
+        return -1;
+    }
+
+    for (lap = 0; lap < 2; ++lap) {
+        if (pg->rank == 0) {
+            if (write_full(pg->sock_next, &token, 1) != 0 ||
+                read_full(pg->sock_previous, &token, 1) != 0) {
+                return -1;
+            }
+        } else if (read_full(pg->sock_previous, &token, 1) != 0 ||
+                   write_full(pg->sock_next, &token, 1) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
 {
     pg_metadata_t local_metadata;
@@ -296,12 +327,16 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     int listen_port;
     int next_port;
     int rc = -1;
+    uint32_t psn_next;
+    uint32_t psn_previous;
 
     if (!pg || !host_list || host_count != pg->size || pg->size <= 0 ||
         PG_BOOTSTRAP_BASE_PORT + pg->size >= 65536) {
         return -1;
     }
-    if (metadata_from_process_group(pg, &local_metadata) != 0) {
+    psn_next = (uint32_t)(rand() & 0x00ffffffu);
+    psn_previous = (uint32_t)(rand() & 0x00ffffffu);
+    if (metadata_from_qp(pg, pg->qp_send, psn_next, &local_metadata) != 0) {
         return -1;
     }
 
@@ -331,6 +366,7 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     PG_TRACE(pg->rank, "Sending metadata to next rank %d", pg->next_rank);
     if (send_peer_metadata(outgoing_fd, &local_metadata) != 0 ||
         receive_peer_metadata(incoming_fd, &remote_metadata) != 0 ||
+        metadata_from_qp(pg, pg->qp_recv, psn_previous, &local_metadata) != 0 ||
         send_peer_metadata(incoming_fd, &local_metadata) != 0 ||
         receive_peer_metadata(outgoing_fd, &pg->next_peer) != 0 ||
         validate_peer_metadata(&pg->next_peer, (uint32_t)pg->next_rank,
@@ -343,8 +379,19 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     PG_TRACE(pg->rank, "Peer metadata validated for ranks %d and %d",
              pg->previous_rank, pg->next_rank);
     pg->previous_peer = remote_metadata;
-    if (pg->size == 2) {
-        pg->previous_peer = pg->next_peer;
+    if (connect_rdma_qp(pg, pg->qp_send, psn_next, &pg->next_peer) != 0 ||
+        connect_rdma_qp(pg, pg->qp_recv, psn_previous, &pg->previous_peer) != 0) {
+        PG_TRACE(pg->rank, "Could not move directional QPs to RTS");
+        goto cleanup;
+    }
+    pg->sock_next = outgoing_fd;
+    pg->sock_previous = incoming_fd;
+    outgoing_fd = -1;
+    incoming_fd = -1;
+    pg->is_connected = 1;
+    if (bootstrap_ring_barrier(pg) != 0) {
+        PG_TRACE(pg->rank, "Ring setup barrier failed");
+        goto cleanup;
     }
     rc = 0;
 
