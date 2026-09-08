@@ -10,8 +10,9 @@ void usage(const char *prog)
 {
     fprintf(stderr,
             "Usage: %s -myindex <rank> -list <host1> [host2 ...]\n"
+            "       %s -myindex <rank> -list <host1> [host2 ...] -token\n"
             "       %s <hostname>\n",
-            prog, prog);
+            prog, prog, prog);
 }
 
 int parse_rank_and_hosts(int argc, char **argv, int *myindex, char ***host_list, int *host_count)

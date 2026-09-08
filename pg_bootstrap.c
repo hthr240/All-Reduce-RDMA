@@ -393,6 +393,7 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
         PG_TRACE(pg->rank, "Ring setup barrier failed");
         goto cleanup;
     }
+    PG_TRACE(pg->rank, "Ring setup barrier completed; transport is ready");
     rc = 0;
 
 cleanup:

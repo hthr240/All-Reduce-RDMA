@@ -209,8 +209,10 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
             IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
             IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
     if (ibv_modify_qp(qp, &attr, flags) != 0) {
+        PG_LOG_ERROR("pg_verbs", "Could not move QP 0x%x to RTR", qp->qp_num);
         return -1;
     }
+    PG_LOG_DEBUG("pg_verbs", "QP 0x%x moved to RTR", qp->qp_num);
 
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTS;
@@ -221,7 +223,12 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
     attr.max_rd_atomic = 1;
     flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
             IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
-    return ibv_modify_qp(qp, &attr, flags) == 0 ? 0 : -1;
+    if (ibv_modify_qp(qp, &attr, flags) != 0) {
+        PG_LOG_ERROR("pg_verbs", "Could not move QP 0x%x to RTS", qp->qp_num);
+        return -1;
+    }
+    PG_LOG_INFO("pg_verbs", "QP 0x%x moved to RTS", qp->qp_num);
+    return 0;
 }
 
 int ring_token(pg_handle_t *pg, int laps)
@@ -256,7 +263,9 @@ int ring_token(pg_handle_t *pg, int laps)
         struct ibv_send_wr *bad_send = NULL;
         int received = 0;
         int sent = pg->rank == 0 ? 1 : 0;
-        int send_done = pg->rank == 0 ? 0 : 1;
+        int send_done = 0;
+
+        *(unsigned char *)pg->buf = token;
 
         if (ibv_post_recv(pg->qp_recv, &recv_wr, &bad_recv) != 0) {
             return -1;
@@ -278,6 +287,10 @@ int ring_token(pg_handle_t *pg, int laps)
                     wc[0].byte_len != 1 || pg->buf == NULL) {
                     return -1;
                 }
+                if (*(unsigned char *)pg->buf != token) {
+                    PG_LOG_ERROR("pg_verbs", "Ring token payload mismatch on lap %d", lap);
+                    return -1;
+                }
                 received = 1;
                 if (!sent && ibv_post_send(pg->qp_send, &send_wr, &bad_send) != 0) {
                     return -1;
@@ -296,6 +309,7 @@ int ring_token(pg_handle_t *pg, int laps)
                 send_done = 1;
             }
         }
+        PG_LOG_DEBUG("pg_verbs", "Ring token lap %d completed", lap + 1);
     }
     return 0;
 }

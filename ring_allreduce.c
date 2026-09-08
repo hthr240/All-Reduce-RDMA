@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "pg_common.h"
@@ -207,8 +208,15 @@ int main(int argc, char **argv)
     char *hostname = NULL;
     void *pg_handle = NULL;
     int rc;
+    int run_token = 0;
 
     PG_LOG_INFO("main", "Starting ring_allreduce (argc=%d)", argc);
+
+    for (rc = 1; rc < argc; ++rc) {
+        if (strcmp(argv[rc], "-token") == 0) {
+            run_token = 1;
+        }
+    }
 
     if (argc < 2) {
         PG_LOG_ERROR("main", "Insufficient arguments");
@@ -284,6 +292,15 @@ int main(int argc, char **argv)
         PG_LOG_INFO("main", "Ring bootstrap completed successfully");
     } else {
         PG_LOG_INFO("main", "Standalone or single-rank mode - skipping bootstrap");
+    }
+
+    if (run_token) {
+        PG_LOG_INFO("main", "Running ring token smoke test");
+        rc = pg_ring_token(pg_handle, 1);
+        PG_LOG_INFO("main", "Ring token smoke test %s", rc == 0 ? "passed" : "failed");
+        free(host_list);
+        pg_close(pg_handle);
+        return rc == 0 ? 0 : 1;
     }
 
     PG_LOG_INFO("main", "Exercise 3 local Verbs state initialized for rank %d",
