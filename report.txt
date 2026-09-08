@@ -43,8 +43,8 @@ Public API
   call it with NULL.
 
 Supported values
-- DATATYPE values are PG_INT32, PG_INT64, PG_FLOAT, and PG_DOUBLE.
-- OPERATION values are PG_SUM, PG_MAX, and PG_MIN.
+- DATATYPE values are PG_INT32 and PG_DOUBLE, matching the reference.
+- OPERATION values are PG_SUM and PG_PROD, matching the reference.
 - Unsupported datatype or operation values are rejected with a nonzero result.
 
 Process-group and command line
@@ -131,3 +131,13 @@ with setup and teardown barriers. The -token action and pg_ring_token API
 provide a one-byte SEND/RECV connectivity smoke test. test_phase4 validates
 the directional resource layout and invalid token arguments; the live token
 test requires two RDMA-capable ranks.
+
+Phase 5 status: reference-compatible reduction primitives
+------------------------------------------------------------
+
+The Phase 5 implementation narrows the collective contract to the reference's
+two datatypes and two operations, then adds hardware-independent helpers for
+element sizes, validation, uneven chunk lengths, chunk offsets, and in-place
+element-wise reduction. test_phase5 covers int32 and double SUM/PROD cases,
+uneven counts, empty chunks, and invalid arguments. RDMA Reduce Scatter and
+All Gather are not part of this phase yet.

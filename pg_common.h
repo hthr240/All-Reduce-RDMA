@@ -7,25 +7,20 @@
 
 /*
  * DATATYPE:
- *  Supported element types for the collective operation.
- *  These values define what the application may reduce and how each element is interpreted.
+ *  Supported element types from the reference implementation.
  */
 typedef enum {
     PG_INT32 = 0,
-    PG_INT64 = 1,
-    PG_FLOAT = 2,
-    PG_DOUBLE = 3
+    PG_DOUBLE = 1
 } DATATYPE;
 
 /*
  * OPERATION:
- *  Supported reduction operations applied element-wise across ranks.
- *  The implementation will later combine local chunks using the chosen operator.
+ *  Supported reduction operations from the reference implementation.
  */
 typedef enum {
     PG_SUM = 0,
-    PG_MAX = 1,
-    PG_MIN = 2
+    PG_PROD = 1
 } OPERATION;
 
 /*
