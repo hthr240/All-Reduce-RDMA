@@ -333,7 +333,11 @@ int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id)
     wr.wr_id = work_id;
     wr.sg_list = &sge;
     wr.num_sge = 1;
-    return ibv_post_recv(pg->qp_recv, &wr, &bad_wr) == 0 ? 0 : -1;
+    if (ibv_post_recv(pg->qp_recv, &wr, &bad_wr) != 0) {
+        PG_LOG_ERROR("pg_verbs", "Could not post eager receive: bytes=%zu", length);
+        return -1;
+    }
+    return 0;
 }
 
 int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
@@ -362,7 +366,12 @@ int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
     if (length <= 256) {
         wr.send_flags |= IBV_SEND_INLINE;
     }
-    return ibv_post_send(pg->qp_send, &wr, &bad_wr) == 0 ? 0 : -1;
+    if (ibv_post_send(pg->qp_send, &wr, &bad_wr) != 0) {
+        PG_LOG_ERROR("pg_verbs", "Could not post eager send: bytes=%zu imm=0x%x",
+                     length, immediate);
+        return -1;
+    }
+    return 0;
 }
 
 int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc)
