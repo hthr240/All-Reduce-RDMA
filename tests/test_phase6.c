@@ -95,21 +95,35 @@ static int test_single_rank_all_gather(void)
     return 0;
 }
 
-static int test_eager_chunk_limit(void)
+static int test_eager_work_buffer_limit(void)
 {
     pg_handle_t pg = {0};
     unsigned char workspace[PG_BUFFER_SIZE];
-    int input[2049] = {0};
-    int output[2049] = {0};
+    int input[8193] = {0};
+    int output[8193] = {0};
 
     pg.rank = 0;
     pg.size = 2;
     pg.is_connected = 1;
     pg.buf = workspace;
-    if (pg_run_eager_reduce_scatter(&pg, input, output, 2049,
+    if (pg_run_eager_reduce_scatter(&pg, input, output, 8193,
                                     PG_INT32, PG_SUM) != -1 ||
-        pg_run_eager_all_gather(&pg, output, 2049, PG_INT32) != -1) {
-        fprintf(stderr, "oversized eager chunk was accepted\n");
+        pg_run_eager_all_gather(&pg, output, 8193, PG_INT32) != -1) {
+        fprintf(stderr, "eager transfer exceeded the work buffer\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int test_eager_sequence_progression(void)
+{
+    pg_handle_t pg = {0};
+
+    pg.collective_sequence = UINT8_MAX;
+    ++pg.collective_sequence;
+    if (pg.collective_sequence != 0 ||
+        PG_EAGER_IMM(7, 3, 2) != UINT32_C(0x07030002)) {
+        fprintf(stderr, "eager collective sequence encoding is incorrect\n");
         return -1;
     }
     return 0;
@@ -122,7 +136,8 @@ int main(void)
         test_all_gather_schedule() != 0 ||
         test_single_rank_all_reduce() != 0 ||
         test_single_rank_all_gather() != 0 ||
-        test_eager_chunk_limit() != 0) {
+        test_eager_work_buffer_limit() != 0 ||
+        test_eager_sequence_progression() != 0) {
         return EXIT_FAILURE;
     }
     printf("Phase 6 eager transport tests passed\n");

@@ -5,10 +5,10 @@
 #include "pg_reduction.h"
 #include "pg_verbs.h"
 
-#define PG_EAGER_IMM(seq, step, chunk) \
+#define PG_EAGER_IMM(seq, round, segment) \
     ((((uint32_t)(seq) & 0xffu) << 24) | \
-     (((uint32_t)(step) & 0xffu) << 16) | \
-     ((uint32_t)(chunk) & 0xffffu))
+    (((uint32_t)(round) & 0xffu) << 16) | \
+    ((uint32_t)(segment) & 0xffffu))
 
 static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
                                 size_t expected_bytes)
@@ -61,12 +61,24 @@ static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
     return 0;
 }
 
+static size_t eager_segment_count(int count, int nranks, size_t element_size)
+{
+    size_t largest_chunk_bytes;
+
+    largest_chunk_bytes = (size_t)((count + nranks - 1) / nranks) *
+                          element_size;
+    return (largest_chunk_bytes + PG_EAGER_BUFFER_SIZE - 1) /
+           PG_EAGER_BUFFER_SIZE;
+}
+
 int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
                                 void *recvbuf, int count,
                                 DATATYPE datatype, OPERATION operation)
 {
     size_t element_size;
     size_t total_bytes;
+    uint32_t sequence;
+    size_t segment_count;
     int step;
 
     if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
@@ -82,14 +94,11 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
                      total_bytes);
         return -1;
     }
-    if ((size_t)pg_chunk_nelem(count, pg->size, 0) * element_size >
-        PG_EAGER_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective", "Reduce Scatter chunk exceeds eager buffer");
-        return -1;
-    }
     PG_LOG_INFO("pg_collective",
                 "Starting eager Reduce Scatter: rank=%d size=%d count=%d bytes=%zu",
                 pg->rank, pg->size, count, total_bytes);
+    sequence = pg->collective_sequence;
+    segment_count = eager_segment_count(count, pg->size, element_size);
     memcpy(pg->buf, sendbuf, total_bytes);
 
     for (step = 0; step < pg->size - 1; ++step) {
@@ -101,27 +110,49 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
         int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
         size_t receive_bytes = (size_t)receive_count * element_size;
         size_t send_bytes = (size_t)send_count * element_size;
+        size_t segment_index;
 
         PG_LOG_DEBUG("pg_collective",
                  "Reduce Scatter round %d: send_chunk=%d send_bytes=%zu receive_chunk=%d receive_bytes=%zu",
                  step, send_chunk, send_bytes, receive_chunk, receive_bytes);
-        if (receive_count < 0 || send_count < 0 ||
-            post_eager_receive(pg, receive_bytes, (uint64_t)step) != 0 ||
-            post_eager_send(pg,
-                            (unsigned char *)pg->buf +
-                                (size_t)send_offset * element_size,
-                            send_bytes,
-                            PG_EAGER_IMM(0, step, send_chunk),
-                            (uint64_t)step) != 0 ||
-            wait_for_eager_round(pg,
-                                 PG_EAGER_IMM(0, step, receive_chunk),
-                                 receive_bytes) != 0 ||
-            pg_reduce((unsigned char *)pg->buf +
-                          (size_t)receive_offset * element_size,
-                      (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
-                      receive_count, datatype, operation) != 0) {
+        if (receive_count < 0 || send_count < 0) {
             PG_LOG_ERROR("pg_collective", "Eager Reduce Scatter failed at round %d", step);
             return -1;
+        }
+        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
+            size_t segment_offset = segment_index * PG_EAGER_BUFFER_SIZE;
+            size_t receive_segment_bytes = receive_bytes > segment_offset ?
+                receive_bytes - segment_offset : 0;
+            size_t send_segment_bytes = send_bytes > segment_offset ?
+                send_bytes - segment_offset : 0;
+            int receive_segment_count;
+
+            if (receive_segment_bytes > PG_EAGER_BUFFER_SIZE) {
+                receive_segment_bytes = PG_EAGER_BUFFER_SIZE;
+            }
+            if (send_segment_bytes > PG_EAGER_BUFFER_SIZE) {
+                send_segment_bytes = PG_EAGER_BUFFER_SIZE;
+            }
+            receive_segment_count = (int)(receive_segment_bytes / element_size);
+            if (post_eager_receive(pg, receive_segment_bytes, (uint64_t)step) != 0 ||
+                post_eager_send(pg,
+                                (unsigned char *)pg->buf +
+                                    (size_t)send_offset * element_size + segment_offset,
+                                send_segment_bytes,
+                                PG_EAGER_IMM(sequence, step, segment_index),
+                                (uint64_t)step) != 0 ||
+                wait_for_eager_round(pg,
+                                     PG_EAGER_IMM(sequence, step, segment_index),
+                                     receive_segment_bytes) != 0 ||
+                pg_reduce((unsigned char *)pg->buf +
+                              (size_t)receive_offset * element_size + segment_offset,
+                          (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
+                          receive_segment_count, datatype, operation) != 0) {
+                PG_LOG_ERROR("pg_collective",
+                             "Eager Reduce Scatter failed at round %d segment %zu",
+                             step, segment_index);
+                return -1;
+            }
         }
     }
 
@@ -144,6 +175,8 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
 {
     size_t element_size;
     size_t total_bytes;
+    uint32_t sequence;
+    size_t segment_count;
     int step;
 
     if (!pg || !pg->is_connected || !pg->buf || !recvbuf || count < 0 ||
@@ -163,15 +196,11 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
                      total_bytes);
         return -1;
     }
-    if ((size_t)pg_chunk_nelem(count, pg->size, 0) * element_size >
-        PG_EAGER_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective", "All Gather chunk exceeds eager buffer");
-        return -1;
-    }
-
     PG_LOG_INFO("pg_collective",
                 "Starting eager All Gather: rank=%d size=%d count=%d bytes=%zu",
                 pg->rank, pg->size, count, total_bytes);
+    sequence = pg->collective_sequence;
+    segment_count = eager_segment_count(count, pg->size, element_size);
     for (step = 0; step < pg->size - 1; ++step) {
         int send_chunk = pg_all_gather_send_chunk(pg->rank, step, pg->size);
         int receive_chunk = pg_all_gather_receive_chunk(pg->rank, step,
@@ -182,6 +211,7 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
         int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
         size_t send_bytes = (size_t)send_count * element_size;
         size_t receive_bytes = (size_t)receive_count * element_size;
+        size_t segment_index;
 
         if (send_count < 0 || send_offset < 0 ||
             receive_count < 0 || receive_offset < 0) {
@@ -195,27 +225,45 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
                      "All Gather round %d: send_chunk=%d send_bytes=%zu receive_chunk=%d receive_bytes=%zu",
                      step, send_chunk, send_bytes, receive_chunk,
                      receive_bytes);
-        if (post_eager_receive(pg, receive_bytes, (uint64_t)step) != 0 ||
-            post_eager_send(pg,
-                            (unsigned char *)pg->buf +
-                                (size_t)send_offset * element_size,
-                            send_bytes,
-                            PG_EAGER_IMM(1, step, send_chunk),
-                            (uint64_t)step) != 0 ||
-            wait_for_eager_round(pg,
-                                 PG_EAGER_IMM(1, step, receive_chunk),
-                                 receive_bytes) != 0) {
-            PG_LOG_ERROR("pg_collective", "Eager All Gather failed at round %d",
-                         step);
-            return -1;
+        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
+            size_t segment_offset = segment_index * PG_EAGER_BUFFER_SIZE;
+            size_t receive_segment_bytes = receive_bytes > segment_offset ?
+                receive_bytes - segment_offset : 0;
+            size_t send_segment_bytes = send_bytes > segment_offset ?
+                send_bytes - segment_offset : 0;
+
+            if (receive_segment_bytes > PG_EAGER_BUFFER_SIZE) {
+                receive_segment_bytes = PG_EAGER_BUFFER_SIZE;
+            }
+            if (send_segment_bytes > PG_EAGER_BUFFER_SIZE) {
+                send_segment_bytes = PG_EAGER_BUFFER_SIZE;
+            }
+            if (post_eager_receive(pg, receive_segment_bytes, (uint64_t)step) != 0 ||
+                post_eager_send(pg,
+                                (unsigned char *)pg->buf +
+                                    (size_t)send_offset * element_size + segment_offset,
+                                send_segment_bytes,
+                                PG_EAGER_IMM(sequence, pg->size - 1 + step,
+                                             segment_index),
+                                (uint64_t)step) != 0 ||
+                wait_for_eager_round(pg,
+                                     PG_EAGER_IMM(sequence, pg->size - 1 + step,
+                                                  segment_index),
+                                     receive_segment_bytes) != 0) {
+                PG_LOG_ERROR("pg_collective",
+                             "Eager All Gather failed at round %d segment %zu",
+                             step, segment_index);
+                return -1;
+            }
+            memcpy((unsigned char *)pg->buf +
+                       (size_t)receive_offset * element_size + segment_offset,
+                   (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
+                   receive_segment_bytes);
         }
-        memcpy((unsigned char *)pg->buf +
-                   (size_t)receive_offset * element_size,
-               (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
-               receive_bytes);
     }
 
     memcpy(recvbuf, pg->buf, total_bytes);
+    ++pg->collective_sequence;
     PG_LOG_INFO("pg_collective",
                 "Eager All Gather complete: rank=%d size=%d count=%d bytes=%zu",
                 pg->rank, pg->size, count, total_bytes);

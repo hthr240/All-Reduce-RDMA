@@ -71,6 +71,8 @@ typedef struct pg_handle {
     /* Bootstrap sockets remain open for transport barriers and shutdown. */
     int sock_previous;
     int sock_next;
+    /* Incremented after every complete eager collective. */
+    uint8_t collective_sequence;
 } pg_handle_t;
 
 /* Small initial values for the first local Verbs setup milestone. */
