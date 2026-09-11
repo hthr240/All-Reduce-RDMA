@@ -16,7 +16,8 @@ static int test_invalid_eager_transport(void)
     if (post_eager_receive(NULL, 1, 0) != -1 ||
         post_eager_send(NULL, &value, sizeof(value), 0, 0) != -1 ||
         poll_eager_completion(NULL, 1, NULL) != -1 ||
-        pg_reduce_scatter(NULL, &value, 1, PG_INT32, PG_SUM, &pg) != -1) {
+        pg_reduce_scatter(NULL, &value, 1, PG_INT32, PG_SUM, &pg) != -1 ||
+        pg_run_eager_all_gather(NULL, &value, 1, PG_INT32) != -1) {
         fprintf(stderr, "invalid eager transport arguments were accepted\n");
         return -1;
     }

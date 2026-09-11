@@ -132,3 +132,33 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     }
     return 0;
 }
+
+int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
+                           DATATYPE datatype)
+{
+    size_t element_size;
+    size_t total_bytes;
+
+    if (!pg || !recvbuf || count < 0 || pg_datatype_size(datatype) == 0 ||
+        pg->size <= 0) {
+        PG_LOG_ERROR("pg_collective", "Invalid eager All Gather arguments");
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    element_size = pg_datatype_size(datatype);
+    total_bytes = (size_t)count * element_size;
+    if (total_bytes > PG_WORK_BUFFER_SIZE) {
+        PG_LOG_ERROR("pg_collective", "All Gather output exceeds work buffer: %zu bytes",
+                     total_bytes);
+        return -1;
+    }
+
+    memset(recvbuf, 0, total_bytes);
+    PG_LOG_INFO("pg_collective",
+                "Eager All Gather placeholder complete: rank=%d size=%d count=%d bytes=%zu",
+                pg->rank, pg->size, count, total_bytes);
+    return 0;
+}
