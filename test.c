@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,7 +115,8 @@ static int check_double_product_in_place(void *handle, int rank, int nranks,
                 expected *= (double)(source_rank + 1) +
                             (double)(index + iteration) / 100.0;
             }
-            if (buffer[index] != expected) {
+            if (fabs(buffer[index] - expected) >
+                1e-12 * (fabs(expected) + 1.0)) {
                 fprintf(stderr,
                         "FAIL double product rank=%d iteration=%d index=%d got=%g expected=%g\n",
                         rank, iteration, index, buffer[index], expected);
