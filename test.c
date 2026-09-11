@@ -86,6 +86,50 @@ static int check_all_reduce(void *handle, int rank, int nranks, int count,
     return 0;
 }
 
+static int check_double_product_in_place(void *handle, int rank, int nranks,
+                                         int count, int repeat)
+{
+    double *buffer;
+    int index;
+    int source_rank;
+
+    buffer = malloc((size_t)(count > 0 ? count : 1) * sizeof(*buffer));
+    if (!buffer) {
+        return -1;
+    }
+    for (int iteration = 0; iteration < repeat; ++iteration) {
+        for (index = 0; index < count; ++index) {
+            buffer[index] = (double)(rank + 1) +
+                            (double)(index + iteration) / 100.0;
+        }
+        if (pg_all_reduce(buffer, buffer, count, PG_DOUBLE, PG_PROD,
+                          handle) != 0) {
+            free(buffer);
+            return -1;
+        }
+        for (index = 0; index < count; ++index) {
+            double expected = 1.0;
+
+            for (source_rank = 0; source_rank < nranks; ++source_rank) {
+                expected *= (double)(source_rank + 1) +
+                            (double)(index + iteration) / 100.0;
+            }
+            if (buffer[index] != expected) {
+                fprintf(stderr,
+                        "FAIL double product rank=%d iteration=%d index=%d got=%g expected=%g\n",
+                        rank, iteration, index, buffer[index], expected);
+                free(buffer);
+                return -1;
+            }
+        }
+    }
+    fprintf(stderr,
+            "PASS all_reduce rank=%d count=%d double product in-place repeat=%d\n",
+            rank, count, repeat);
+    free(buffer);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     char **hosts = NULL;
@@ -140,6 +184,10 @@ int main(int argc, char **argv)
 
     rc = token ? pg_ring_token(handle, host_count)
                : check_all_reduce(handle, rank, host_count, count, repeat);
+    if (rc == 0 && !token) {
+        rc = check_double_product_in_place(handle, rank, host_count, count,
+                                           repeat);
+    }
     if (rc == 0 && token) {
         fprintf(stderr, "PASS token rank=%d laps=%d\n", rank, host_count);
     }

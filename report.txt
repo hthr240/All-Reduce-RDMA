@@ -164,5 +164,10 @@ in-place calls, uneven chunks, and reject chunks larger than the bounded eager
 receive buffer. Phase 6 tests cover both schedules, public chunk ownership,
 single-rank behavior, eager size limits, and invalid transport arguments.
 
-The implementation still requires live multi-rank validation on RDMA-capable
-Linux hosts for 2-rank and 4-rank SUM/PROD cases before the branch is merged.
+The eager transport now splits each ring chunk into bounded 4 KiB transfers,
+reusing the registered receive slot only after both send and receive
+completions. Immediate data identifies the collective sequence, ring round,
+and segment number. The course driver checks repeated int32 SUM calls and
+in-place double PRODUCT calls. The implementation still requires live
+multi-rank validation on RDMA-capable Linux hosts for 2-rank and 4-rank cases
+at small and segmented payload sizes before rendezvous work begins.
