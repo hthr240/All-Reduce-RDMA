@@ -10,7 +10,7 @@
 static void usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>]\n",
+            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>]\n",
             program);
 }
 
@@ -37,7 +37,8 @@ static int build_group_spec(int rank, char **hosts, int host_count,
     return 0;
 }
 
-static int check_all_reduce(void *handle, int rank, int nranks, int count)
+static int check_all_reduce(void *handle, int rank, int nranks, int count,
+                            int repeat)
 {
     int32_t *sendbuf;
     int32_t *recvbuf;
@@ -54,29 +55,32 @@ static int check_all_reduce(void *handle, int rank, int nranks, int count)
         free(recvbuf);
         return -1;
     }
-    for (index = 0; index < count; ++index) {
-        sendbuf[index] = (rank + 1) * 1000 + index;
-    }
-    if (pg_all_reduce(sendbuf, recvbuf, count, PG_INT32, PG_SUM, handle) != 0) {
-        free(sendbuf);
-        free(recvbuf);
-        return -1;
-    }
-    for (index = 0; index < count; ++index) {
-        int32_t expected = 0;
-
-        for (source_rank = 0; source_rank < nranks; ++source_rank) {
-            expected += (source_rank + 1) * 1000 + index;
+    for (int iteration = 0; iteration < repeat; ++iteration) {
+        for (index = 0; index < count; ++index) {
+            sendbuf[index] = (rank + 1) * 1000 + index + iteration;
         }
-        if (recvbuf[index] != expected) {
-            fprintf(stderr, "FAIL rank=%d index=%d got=%d expected=%d\n",
-                    rank, index, recvbuf[index], expected);
+        if (pg_all_reduce(sendbuf, recvbuf, count, PG_INT32, PG_SUM, handle) != 0) {
             free(sendbuf);
             free(recvbuf);
             return -1;
         }
+        for (index = 0; index < count; ++index) {
+            int32_t expected = 0;
+
+            for (source_rank = 0; source_rank < nranks; ++source_rank) {
+                expected += (source_rank + 1) * 1000 + index + iteration;
+            }
+            if (recvbuf[index] != expected) {
+                fprintf(stderr, "FAIL rank=%d iteration=%d index=%d got=%d expected=%d\n",
+                        rank, iteration, index, recvbuf[index], expected);
+                free(sendbuf);
+                free(recvbuf);
+                return -1;
+            }
+        }
     }
-    fprintf(stderr, "PASS all_reduce rank=%d count=%d int32 sum\n", rank, count);
+    fprintf(stderr, "PASS all_reduce rank=%d count=%d int32 sum repeat=%d\n",
+            rank, count, repeat);
     free(sendbuf);
     free(recvbuf);
     return 0;
@@ -91,6 +95,7 @@ int main(int argc, char **argv)
     int rank = -1;
     int token = 0;
     int count = 8;
+    int repeat = 1;
     int index;
     int rc;
 
@@ -114,12 +119,15 @@ int main(int argc, char **argv)
             token = 1;
         } else if (strcmp(argv[index], "-check") == 0 && index + 1 < argc) {
             count = atoi(argv[++index]);
+        } else if (strcmp(argv[index], "-repeat") == 0 && index + 1 < argc) {
+            repeat = atoi(argv[++index]);
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
         }
     }
-    if (rank < 0 || host_count < 2 || rank >= host_count || count < 0) {
+    if (rank < 0 || host_count < 2 || rank >= host_count || count < 0 ||
+        repeat < 1) {
         usage(argv[0]);
         return EXIT_FAILURE;
     }
@@ -131,7 +139,7 @@ int main(int argc, char **argv)
     }
 
     rc = token ? pg_ring_token(handle, host_count)
-               : check_all_reduce(handle, rank, host_count, count);
+               : check_all_reduce(handle, rank, host_count, count, repeat);
     if (rc == 0 && token) {
         fprintf(stderr, "PASS token rank=%d laps=%d\n", rank, host_count);
     }

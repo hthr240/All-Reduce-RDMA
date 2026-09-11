@@ -115,6 +115,20 @@ static int test_eager_chunk_limit(void)
     return 0;
 }
 
+static int test_eager_sequence_progression(void)
+{
+    pg_handle_t pg = {0};
+
+    pg.collective_sequence = UINT8_MAX;
+    ++pg.collective_sequence;
+    if (pg.collective_sequence != 0 ||
+        PG_EAGER_IMM(7, 3, 2) != UINT32_C(0x07030002)) {
+        fprintf(stderr, "eager collective sequence encoding is incorrect\n");
+        return -1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_invalid_eager_transport() != 0 ||
@@ -122,7 +136,8 @@ int main(void)
         test_all_gather_schedule() != 0 ||
         test_single_rank_all_reduce() != 0 ||
         test_single_rank_all_gather() != 0 ||
-        test_eager_chunk_limit() != 0) {
+        test_eager_chunk_limit() != 0 ||
+        test_eager_sequence_progression() != 0) {
         return EXIT_FAILURE;
     }
     printf("Phase 6 eager transport tests passed\n");
