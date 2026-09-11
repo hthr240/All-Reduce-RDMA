@@ -9,8 +9,8 @@
 void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s -myindex <rank> -list <host1> [host2 ...]\n"
-            "       %s -myindex <rank> -list <host1> [host2 ...] -token\n"
+            "Usage: %s -myindex <one-based-rank> -list <host1> [host2 ...]\n"
+            "       %s -myindex <one-based-rank> -list <host1> [host2 ...] -token\n"
             "       %s <hostname>\n",
             prog, prog, prog);
 }
@@ -27,11 +27,11 @@ int parse_rank_and_hosts(int argc, char **argv, int *myindex, char ***host_list,
         if (strcmp(argv[i], "-myindex") == 0 && i + 1 < argc) {
             char *end = NULL;
             long value = strtol(argv[++i], &end, 10);
-            if (end == argv[i] || value < 0 || value > 65535) {
-                fprintf(stderr, "Invalid -myindex value\n");
+            if (end == argv[i] || *end != '\0' || value < 1 || value > 65536) {
+                fprintf(stderr, "Invalid one-based -myindex value\n");
                 return -1;
             }
-            *myindex = (int)value;
+            *myindex = (int)value - 1;
         } else if (strcmp(argv[i], "-list") == 0) {
             int count = 0;
             char **list = NULL;

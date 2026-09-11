@@ -12,6 +12,13 @@
  */
 int validate_host_list(char **host_list, int host_count);
 
+/* Parse "<one-based-rank>:<host0>,<host1>,..." into ring membership. */
+int parse_process_group_spec(const char *spec, int *rank,
+							 char ***host_list, int *host_count);
+
+/* Release a host list returned by parse_process_group_spec. */
+void free_process_group_hosts(char **host_list, int host_count);
+
 /*
  * configure_process_group_topology:
  *  Store a rank's position in the logical ring and calculate its neighbors.

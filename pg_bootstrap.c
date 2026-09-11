@@ -393,11 +393,11 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     pg->sock_previous = incoming_fd;
     outgoing_fd = -1;
     incoming_fd = -1;
-    pg->is_connected = 1;
     if (bootstrap_ring_barrier(pg) != 0) {
         PG_TRACE(pg->rank, "Ring setup barrier failed");
         goto cleanup;
     }
+    pg->is_connected = 1;
     PG_TRACE(pg->rank, "Ring setup barrier completed; transport is ready");
     rc = 0;
 

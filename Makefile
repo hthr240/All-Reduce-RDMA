@@ -7,15 +7,19 @@ LDLIBS += -lm
 TARGET := ring_allreduce
 SRC := ring_allreduce.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c pg_reduction.c pg_collective.c
 OBJ := $(SRC:.c=.o)
+COURSE_TEST := test
 TEST_SOURCES := $(wildcard tests/test_phase*.c)
 TEST_TARGETS := $(TEST_SOURCES:.c=)
 TEST_PHASE_NUMBERS := $(patsubst tests/test_phase%,%,$(TEST_TARGETS))
 TEST_PHASE_TARGETS := $(addprefix test-phase,$(TEST_PHASE_NUMBERS))
 
-all: $(TARGET)
+all: $(TARGET) $(COURSE_TEST)
 
 $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(OBJ) $(LDLIBS)
+
+$(COURSE_TEST): test.c pg.h $(SRC)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DPG_LIBRARY_ONLY -o $@ test.c $(SRC) $(LDLIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
@@ -23,7 +27,7 @@ $(TARGET): $(OBJ)
 tests/test_phase%: tests/test_phase%.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c pg_reduction.c pg_collective.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c pg_log.c pg_reduction.c pg_collective.c $(LDLIBS)
 
-test: $(TEST_TARGETS)
+check: $(TEST_TARGETS)
 	@set -e; for test_target in $(TEST_TARGETS); do \
 		./$$test_target; \
 	done; \
@@ -34,6 +38,6 @@ $(TEST_PHASE_TARGETS): test-phase%: tests/test_phase%
 	@printf 'All tests passed for phase %s\n' "$*"
 
 clean:
-	rm -f $(OBJ) $(TARGET) $(TEST_TARGETS)
+	rm -f $(OBJ) $(TARGET) $(COURSE_TEST) $(TEST_TARGETS)
 
-.PHONY: all test $(TEST_PHASE_TARGETS) clean
+.PHONY: all check $(TEST_PHASE_TARGETS) clean

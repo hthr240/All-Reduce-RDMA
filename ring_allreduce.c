@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "pg.h"
 #include "pg_common.h"
 #include "pg_log.h"
 #include "pg_verbs.h"
@@ -70,10 +71,22 @@ static void destroy_process_group(pg_handle_t *pg)
 int connect_process_group(char *servername, void **pg_handle)
 {
     pg_handle_t *pg = NULL;
+    char **host_list = NULL;
+    int rank = 0;
+    int host_count = 1;
+    int distributed = 0;
 
     /* Without this output address there is nowhere to return the new handle. */
-    if (!pg_handle) {
+    if (!servername || !pg_handle) {
         fprintf(stderr, "Invalid process-group handle pointer\n");
+        return -1;
+    }
+    *pg_handle = NULL;
+
+    distributed = strchr(servername, ':') != NULL;
+    if (distributed &&
+        parse_process_group_spec(servername, &rank, &host_list, &host_count) != 0) {
+        fprintf(stderr, "Invalid process-group specification\n");
         return -1;
     }
 
@@ -84,31 +97,41 @@ int connect_process_group(char *servername, void **pg_handle)
         return -1;
     }
 
-    /* Rank and group size are placeholders until the topology phase. */
-    pg->rank = 0;
-    pg->size = 1;
+    pg->rank = rank;
+    pg->size = host_count;
     pg->is_connected = 0;
     pg->sock_previous = -1;
     pg->sock_next = -1;
 
     /* Keep an owned hostname copy; the caller retains ownership of its input. */
-    pg->hostname = servername ? strdup(servername) : NULL;
-    if (servername && !pg->hostname) {
+    pg->hostname = strdup(distributed ? host_list[rank] : servername);
+    if (!pg->hostname ||
+        configure_process_group_topology(pg, rank, host_count) != 0) {
         fprintf(stderr, "Could not copy process-group hostname\n");
         destroy_process_group(pg);
+        free_process_group_hosts(host_list, host_count);
         return -1;
     }
 
     /* Initialize all RDMA resources via the verbs module. */
     if (create_rdma_resources(pg) != 0) {
         destroy_process_group(pg);
+        free_process_group_hosts(host_list, host_count);
         return -1;
     }
 
-    /* Only local initialization is complete; remote connection comes later. */
-    pg->is_connected = 1;
+    if (distributed) {
+        if (bootstrap_ring(pg, host_list, host_count) != 0) {
+            destroy_process_group(pg);
+            free_process_group_hosts(host_list, host_count);
+            return -1;
+        }
+    } else {
+        pg->is_connected = 1;
+    }
 
     *pg_handle = pg;
+    free_process_group_hosts(host_list, host_count);
     return 0;
 }
 
@@ -295,6 +318,7 @@ int pg_close(void *pg_handle)
     return 0;
 }
 
+ #ifndef PG_LIBRARY_ONLY
 /*
  * main:
  *  Program entry point.
@@ -440,3 +464,4 @@ int main(int argc, char **argv)
     PG_LOG_INFO("main", "Process group closed successfully");
     return 0;
 }
+#endif /* PG_LIBRARY_ONLY */

@@ -70,10 +70,68 @@ static int test_host_list_validation(void)
     return 0;
 }
 
+static int test_course_rank_numbering(void)
+{
+    char *arguments[] = {
+        "test", "-myindex", "01", "-list", "mlx-stud-01", "mlx-stud-02"
+    };
+    char **hosts = NULL;
+    int rank = -1;
+    int host_count = 0;
+    int index;
+
+    if (parse_rank_and_hosts(6, arguments, &rank, &hosts, &host_count) != 0 ||
+        rank != 0 || host_count != 2 || strcmp(hosts[rank], "mlx-stud-01") != 0) {
+        fprintf(stderr, "course one-based rank numbering is incorrect\n");
+        for (index = 0; hosts && index < host_count; ++index) {
+            free(hosts[index]);
+        }
+        free(hosts);
+        return -1;
+    }
+    for (index = 0; index < host_count; ++index) {
+        free(hosts[index]);
+    }
+    free(hosts);
+    return 0;
+}
+
+static int test_process_group_spec(void)
+{
+    char **hosts = NULL;
+    int rank = -1;
+    int host_count = 0;
+
+    if (parse_process_group_spec("01:mlx-stud-01,mlx-stud-02", &rank,
+                                 &hosts, &host_count) != 0 ||
+        rank != 0 || host_count != 2 ||
+        strcmp(hosts[0], "mlx-stud-01") != 0 ||
+        strcmp(hosts[1], "mlx-stud-02") != 0) {
+        fprintf(stderr, "process-group specification parsing is incorrect\n");
+        free_process_group_hosts(hosts, host_count);
+        return -1;
+    }
+    free_process_group_hosts(hosts, host_count);
+
+    if (parse_process_group_spec("00:mlx-stud-01,mlx-stud-02", &rank,
+                                 &hosts, &host_count) != -1 ||
+        parse_process_group_spec("03:mlx-stud-01,mlx-stud-02", &rank,
+                                 &hosts, &host_count) != -1 ||
+        parse_process_group_spec("01:mlx-stud-01,,mlx-stud-02", &rank,
+                                 &hosts, &host_count) != -1 ||
+        parse_process_group_spec("01:mlx-stud-01,", &rank,
+                                 &hosts, &host_count) != -1) {
+        fprintf(stderr, "invalid process-group specification was accepted\n");
+        return -1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_ring_neighbors() != 0 || test_invalid_topology() != 0 ||
-        test_host_list_validation() != 0) {
+        test_host_list_validation() != 0 || test_course_rank_numbering() != 0 ||
+        test_process_group_spec() != 0) {
         return EXIT_FAILURE;
     }
 

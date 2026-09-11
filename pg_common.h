@@ -5,23 +5,7 @@
 #include <stdint.h>
 #include <infiniband/verbs.h>
 
-/*
- * DATATYPE:
- *  Supported element types from the reference implementation.
- */
-typedef enum {
-    PG_INT32 = 0,
-    PG_DOUBLE = 1
-} DATATYPE;
-
-/*
- * OPERATION:
- *  Supported reduction operations from the reference implementation.
- */
-typedef enum {
-    PG_SUM = 0,
-    PG_PROD = 1
-} OPERATION;
+#include "pg.h"
 
 /*
  * pg_metadata_t:
