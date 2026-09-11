@@ -10,7 +10,7 @@
 static void usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>]\n",
+            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>] [-int-only]\n",
             program);
 }
 
@@ -138,6 +138,7 @@ int main(int argc, char **argv)
     int host_count = 0;
     int rank = -1;
     int token = 0;
+    int int_only = 0;
     int count = 8;
     int repeat = 1;
     int index;
@@ -165,6 +166,8 @@ int main(int argc, char **argv)
             count = atoi(argv[++index]);
         } else if (strcmp(argv[index], "-repeat") == 0 && index + 1 < argc) {
             repeat = atoi(argv[++index]);
+        } else if (strcmp(argv[index], "-int-only") == 0) {
+            int_only = 1;
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
@@ -184,7 +187,7 @@ int main(int argc, char **argv)
 
     rc = token ? pg_ring_token(handle, host_count)
                : check_all_reduce(handle, rank, host_count, count, repeat);
-    if (rc == 0 && !token) {
+    if (rc == 0 && !token && !int_only) {
         rc = check_double_product_in_place(handle, rank, host_count, count,
                                            repeat);
     }

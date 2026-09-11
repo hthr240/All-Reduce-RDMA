@@ -170,4 +170,6 @@ completions. Immediate data identifies the collective sequence, ring round,
 and segment number. The course driver checks repeated int32 SUM calls and
 in-place double PRODUCT calls. The implementation still requires live
 multi-rank validation on RDMA-capable Linux hosts for 2-rank and 4-rank cases
-at small and segmented payload sizes before rendezvous work begins.
+at small and segmented payload sizes before rendezvous work begins. Its
+`-int-only` option permits segmented int32 payloads above the double
+workspace limit.
