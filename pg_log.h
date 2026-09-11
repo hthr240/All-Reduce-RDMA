@@ -14,6 +14,10 @@ typedef enum {
 /* Set global log level (default: PG_LOG_INFO) */
 void pg_log_set_level(pg_log_level_t level);
 
+/* Print a high-level program phase without source-location noise. */
+void pg_log_phase(int rank, int size, int phase, int total,
+                  const char *name);
+
 /* Log functions with module name and level */
 #define PG_LOG_DEBUG(module, ...) \
     pg_log_impl(PG_LOG_DEBUG, (module), __FILE__, __LINE__, __VA_ARGS__)

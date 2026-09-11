@@ -317,6 +317,7 @@ int main(int argc, char **argv)
     int rc;
     int run_token = 0;
 
+    pg_log_phase(-1, 0, 1, 6, "Parse process-group configuration");
     PG_LOG_INFO("main", "Starting ring_allreduce (argc=%d)", argc);
 
     for (rc = 1; rc < argc; ++rc) {
@@ -364,6 +365,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    pg_log_phase(myindex >= 0 ? myindex : 0,
+                 myindex >= 0 ? host_count : 1,
+                 2, 6, "Create local RDMA resources");
     /* Create local RDMA state before adding the ring metadata to the handle. */
     PG_LOG_DEBUG("main", "Connecting process group (hostname=%s)", hostname);
     rc = connect_process_group(hostname, &pg_handle);
@@ -374,6 +378,9 @@ int main(int argc, char **argv)
     }
     PG_LOG_INFO("main", "Process group connected successfully");
 
+    pg_log_phase(myindex >= 0 ? myindex : 0,
+                 myindex >= 0 ? host_count : 1,
+                 3, 6, "Configure logical ring topology");
     /* The host-list rank and size now become part of the opaque handle. */
     PG_LOG_DEBUG("main", "Configuring process group topology");
     if (configure_process_group_topology((pg_handle_t *)pg_handle,
@@ -384,10 +391,16 @@ int main(int argc, char **argv)
         free(host_list);
         return 1;
     }
-    PG_LOG_INFO("main", "Topology configured: rank=%d, size=%d",
+    PG_LOG_INFO("main",
+                "Topology ready: rank=%d size=%d previous=%d next=%d",
                 ((pg_handle_t *)pg_handle)->rank,
-                ((pg_handle_t *)pg_handle)->size);
+                ((pg_handle_t *)pg_handle)->size,
+                ((pg_handle_t *)pg_handle)->previous_rank,
+                ((pg_handle_t *)pg_handle)->next_rank);
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 4, 6, "Connect TCP bootstrap ring and RDMA queue pairs");
     if (myindex >= 0 && host_count > 1) {
         PG_LOG_DEBUG("main", "Starting ring bootstrap for multi-rank group");
         if (bootstrap_ring((pg_handle_t *)pg_handle, host_list, host_count) != 0) {
@@ -401,18 +414,27 @@ int main(int argc, char **argv)
         PG_LOG_INFO("main", "Standalone or single-rank mode - skipping bootstrap");
     }
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 5, 6, "Run requested operation");
     if (run_token) {
         PG_LOG_INFO("main", "Running ring token smoke test");
         rc = pg_ring_token(pg_handle, 1);
         PG_LOG_INFO("main", "Ring token smoke test %s", rc == 0 ? "passed" : "failed");
+        pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                     ((pg_handle_t *)pg_handle)->size,
+                     6, 6, "Synchronize and release resources");
         free(host_list);
         pg_close(pg_handle);
         return rc == 0 ? 0 : 1;
     }
 
-    PG_LOG_INFO("main", "Exercise 3 local Verbs state initialized for rank %d",
-                ((pg_handle_t *)pg_handle)->rank);
+    PG_LOG_INFO("main",
+                "No collective action requested; process group is ready and will close");
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 6, 6, "Synchronize and release resources");
     free(host_list);
     pg_close(pg_handle);
     PG_LOG_INFO("main", "Process group closed successfully");

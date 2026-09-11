@@ -97,7 +97,7 @@ typedef struct pg_handle {
 #define PG_QP_DEPTH 8
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
-#define PG_BOOTSTRAP_RETRIES 50
+#define PG_BOOTSTRAP_RETRIES 600
 
 #define PG_TRACE(rank, ...) do { \
     fprintf(stderr, "[bootstrap rank %d] ", (rank)); \

@@ -219,8 +219,13 @@ static int connect_bootstrap_peer(const char *hostname, int port)
         return -1;
     }
 
+    fprintf(stderr,
+            "Waiting for next rank at %s:%d (timeout: %d seconds)\n",
+            hostname, port, PG_BOOTSTRAP_RETRIES / 10);
+    fflush(stderr);
+
     for (attempt = 0; attempt < PG_BOOTSTRAP_RETRIES && fd < 0; ++attempt) {
-        if (attempt == 0 || attempt % 10 == 0) {
+        if (attempt == 0 || attempt % 50 == 0) {
             fprintf(stderr, "Connecting to bootstrap peer %s:%d (attempt %d/%d)\n",
                     hostname, port, attempt + 1, PG_BOOTSTRAP_RETRIES);
             fflush(stderr);
@@ -236,7 +241,7 @@ static int connect_bootstrap_peer(const char *hostname, int port)
                 break;
             }
             if (fd >= 0) {
-                if (attempt == 0 || attempt % 10 == 0) {
+                if (attempt == 0 || attempt % 50 == 0) {
                     fprintf(stderr, "Bootstrap connect to %s:%d failed: %s\n",
                             hostname, port, strerror(errno));
                     fflush(stderr);
