@@ -161,7 +161,8 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
         return 0;
     }
 
-    if (pg_reduce_scatter(sendbuf, recvbuf, count, datatype, op, pg) != 0) {
+    if (pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                    datatype, op) != 0) {
         fprintf(stderr, "Reduce Scatter stage failed\n");
         return -1;
     }
@@ -216,6 +217,46 @@ int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
     }
     return pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
                                        datatype, op);
+}
+
+int pg_all_gather(void *sendbuf, void *recvbuf, int count,
+                  DATATYPE datatype, void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    size_t element_size;
+    int owned_chunk;
+    int owned_count;
+    int owned_offset;
+
+    if (!pg || !sendbuf || !recvbuf || count < 0 ||
+        pg_datatype_size(datatype) == 0 || pg->size <= 0 ||
+        pg->rank < 0 || pg->rank >= pg->size) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    element_size = pg_datatype_size(datatype);
+    if (pg->size == 1) {
+        memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+    if (!pg->buf || !pg->is_connected) {
+        return -1;
+    }
+
+    owned_chunk = (pg->rank + 1) % pg->size;
+    owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
+    owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
+    if (owned_count < 0 || owned_offset < 0 ||
+        (size_t)count * element_size > PG_WORK_BUFFER_SIZE) {
+        return -1;
+    }
+    memcpy((unsigned char *)pg->buf +
+               (size_t)owned_offset * element_size,
+           sendbuf, (size_t)owned_count * element_size);
+    return pg_run_eager_all_gather(pg, recvbuf, count, datatype);
 }
 
 /* Phase 4 connectivity smoke test; collective data movement comes later. */

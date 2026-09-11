@@ -69,8 +69,9 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     size_t total_bytes;
     int step;
 
-    if (!pg || !pg->is_connected || !sendbuf || !recvbuf || count < 0 ||
-        pg_validate_reduction(datatype, operation) != 0 || pg->size < 2) {
+    if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
+        count < 0 || pg_validate_reduction(datatype, operation) != 0 ||
+        pg->size < 2 || pg->rank < 0 || pg->rank >= pg->size) {
         PG_LOG_ERROR("pg_collective", "Invalid eager Reduce Scatter arguments");
         return -1;
     }
@@ -79,6 +80,11 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     if (total_bytes > PG_WORK_BUFFER_SIZE) {
         PG_LOG_ERROR("pg_collective", "Reduce Scatter input exceeds work buffer: %zu bytes",
                      total_bytes);
+        return -1;
+    }
+    if ((size_t)pg_chunk_nelem(count, pg->size, 0) * element_size >
+        PG_EAGER_BUFFER_SIZE) {
+        PG_LOG_ERROR("pg_collective", "Reduce Scatter chunk exceeds eager buffer");
         return -1;
     }
     PG_LOG_INFO("pg_collective",
@@ -140,8 +146,9 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
     size_t total_bytes;
     int step;
 
-    if (!pg || !recvbuf || count < 0 || pg_datatype_size(datatype) == 0 ||
-        pg->size <= 0) {
+    if (!pg || !pg->is_connected || !pg->buf || !recvbuf || count < 0 ||
+        pg_datatype_size(datatype) == 0 || pg->size < 2 ||
+        pg->rank < 0 || pg->rank >= pg->size) {
         PG_LOG_ERROR("pg_collective", "Invalid eager All Gather arguments");
         return -1;
     }
@@ -156,20 +163,25 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
                      total_bytes);
         return -1;
     }
+    if ((size_t)pg_chunk_nelem(count, pg->size, 0) * element_size >
+        PG_EAGER_BUFFER_SIZE) {
+        PG_LOG_ERROR("pg_collective", "All Gather chunk exceeds eager buffer");
+        return -1;
+    }
 
-    /*
-     * This is the data-path scaffold for the second half of the eager ring
-     * collective. The actual RDMA exchange is still the next refinement, but the
-     * ring geometry and per-round chunk ownership must match the Reduce Scatter
-     * schedule before the transport layer is expanded.
-     */
+    PG_LOG_INFO("pg_collective",
+                "Starting eager All Gather: rank=%d size=%d count=%d bytes=%zu",
+                pg->rank, pg->size, count, total_bytes);
     for (step = 0; step < pg->size - 1; ++step) {
-        int send_chunk = pg_send_chunk(pg->rank, step, pg->size);
-        int receive_chunk = pg_receive_chunk(pg->rank, step, pg->size);
+        int send_chunk = pg_all_gather_send_chunk(pg->rank, step, pg->size);
+        int receive_chunk = pg_all_gather_receive_chunk(pg->rank, step,
+                                                        pg->size);
         int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
         int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
         int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
         int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
+        size_t send_bytes = (size_t)send_count * element_size;
+        size_t receive_bytes = (size_t)receive_count * element_size;
 
         if (send_count < 0 || send_offset < 0 ||
             receive_count < 0 || receive_offset < 0) {
@@ -179,14 +191,33 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
             return -1;
         }
 
-        PG_LOG_INFO("pg_collective",
-                    "All Gather round %d: rank=%d send_chunk=%d send_offset=%d send_count=%d receive_chunk=%d receive_offset=%d receive_count=%d",
-                    step, pg->rank, send_chunk, send_offset, send_count,
-                    receive_chunk, receive_offset, receive_count);
+        PG_LOG_DEBUG("pg_collective",
+                     "All Gather round %d: send_chunk=%d send_bytes=%zu receive_chunk=%d receive_bytes=%zu",
+                     step, send_chunk, send_bytes, receive_chunk,
+                     receive_bytes);
+        if (post_eager_receive(pg, receive_bytes, (uint64_t)step) != 0 ||
+            post_eager_send(pg,
+                            (unsigned char *)pg->buf +
+                                (size_t)send_offset * element_size,
+                            send_bytes,
+                            PG_EAGER_IMM(1, step, send_chunk),
+                            (uint64_t)step) != 0 ||
+            wait_for_eager_round(pg,
+                                 PG_EAGER_IMM(1, step, receive_chunk),
+                                 receive_bytes) != 0) {
+            PG_LOG_ERROR("pg_collective", "Eager All Gather failed at round %d",
+                         step);
+            return -1;
+        }
+        memcpy((unsigned char *)pg->buf +
+                   (size_t)receive_offset * element_size,
+               (unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE,
+               receive_bytes);
     }
 
+    memcpy(recvbuf, pg->buf, total_bytes);
     PG_LOG_INFO("pg_collective",
-                "Eager All Gather schedule validated: rank=%d size=%d count=%d bytes=%zu",
+                "Eager All Gather complete: rank=%d size=%d count=%d bytes=%zu",
                 pg->rank, pg->size, count, total_bytes);
     return 0;
 }

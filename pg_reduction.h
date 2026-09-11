@@ -22,5 +22,7 @@ int pg_reduce(void *dst, const void *src, int count,
 /* Ring schedule helpers shared by eager and rendezvous collectives. */
 int pg_send_chunk(int rank, int step, int nranks);
 int pg_receive_chunk(int rank, int step, int nranks);
+int pg_all_gather_send_chunk(int rank, int step, int nranks);
+int pg_all_gather_receive_chunk(int rank, int step, int nranks);
 
 #endif /* PG_REDUCTION_H */

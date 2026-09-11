@@ -148,8 +148,8 @@ N - 1 Reduce Scatter rounds, and N - 1 All Gather rounds. The eager path will
 be limited to bounded chunks first; rendezvous RDMA writes and pipelining will
 follow only after eager correctness is established.
 
-Phase 6 status: bounded eager Reduce Scatter
-----------------------------------------------
+Phase 6 status: bounded eager All Reduce
+----------------------------------------
 
 The Phase 6 slice expands the registered buffer into local work space and an
 eager receive area, adds SEND_WITH_IMM posting and split-CQ polling helpers,
@@ -157,5 +157,12 @@ and adds the reference ring schedule for send and receive chunks. The public
 Reduce Scatter entry point copies caller input into registered memory, runs
 N - 1 eager rounds, validates immediate data and byte lengths, reduces received
 chunks with pg_reduce(), and returns this rank's owned reduced chunk. Phase 6
-tests cover schedule geometry, public chunk ownership, and invalid transport
-arguments. Full All Gather and end-to-end All Reduce remain the next slice.
+also implements N - 1 All Gather rounds, installs each received chunk at its
+final work-buffer offset, and copies the complete reduced vector to recvbuf.
+The public All Gather and All Reduce entry points support single-rank and
+in-place calls, uneven chunks, and reject chunks larger than the bounded eager
+receive buffer. Phase 6 tests cover both schedules, public chunk ownership,
+single-rank behavior, eager size limits, and invalid transport arguments.
+
+The implementation still requires live multi-rank validation on RDMA-capable
+Linux hosts for 2-rank and 4-rank SUM/PROD cases before the branch is merged.
