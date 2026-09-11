@@ -138,6 +138,7 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
 {
     size_t element_size;
     size_t total_bytes;
+    int step;
 
     if (!pg || !recvbuf || count < 0 || pg_datatype_size(datatype) == 0 ||
         pg->size <= 0) {
@@ -156,9 +157,36 @@ int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
         return -1;
     }
 
-    memset(recvbuf, 0, total_bytes);
+    /*
+     * This is the data-path scaffold for the second half of the eager ring
+     * collective. The actual RDMA exchange is still the next refinement, but the
+     * ring geometry and per-round chunk ownership must match the Reduce Scatter
+     * schedule before the transport layer is expanded.
+     */
+    for (step = 0; step < pg->size - 1; ++step) {
+        int send_chunk = pg_send_chunk(pg->rank, step, pg->size);
+        int receive_chunk = pg_receive_chunk(pg->rank, step, pg->size);
+        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
+        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
+        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
+        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
+
+        if (send_count < 0 || send_offset < 0 ||
+            receive_count < 0 || receive_offset < 0) {
+            PG_LOG_ERROR("pg_collective",
+                         "All Gather schedule produced invalid chunk geometry at step %d",
+                         step);
+            return -1;
+        }
+
+        PG_LOG_INFO("pg_collective",
+                    "All Gather round %d: rank=%d send_chunk=%d send_offset=%d send_count=%d receive_chunk=%d receive_offset=%d receive_count=%d",
+                    step, pg->rank, send_chunk, send_offset, send_count,
+                    receive_chunk, receive_offset, receive_count);
+    }
+
     PG_LOG_INFO("pg_collective",
-                "Eager All Gather placeholder complete: rank=%d size=%d count=%d bytes=%zu",
+                "Eager All Gather schedule validated: rank=%d size=%d count=%d bytes=%zu",
                 pg->rank, pg->size, count, total_bytes);
     return 0;
 }
