@@ -138,20 +138,38 @@ int connect_process_group(char *servername, void **pg_handle)
 int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OPERATION op, void *pg_handle)
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    size_t element_size;
 
-    (void)sendbuf;
-    (void)recvbuf;
-    (void)count;
-    (void)datatype;
-    (void)op;
+    if (!pg || !sendbuf || !recvbuf || count < 0 ||
+        pg_validate_reduction(datatype, op) != 0 ||
+        pg->size <= 0 || pg->rank < 0 || pg->rank >= pg->size) {
+        fprintf(stderr, "Invalid all-reduce arguments\n");
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
 
-    if (!pg) {
-        fprintf(stderr, "Invalid process-group handle\n");
+    element_size = pg_datatype_size(datatype);
+    if (element_size == 0) {
+        fprintf(stderr, "Unsupported datatype for all-reduce\n");
         return -1;
     }
 
-    fprintf(stderr, "pg_all_reduce not implemented in the skeleton build\n");
-    return -1;
+    if (pg->size == 1) {
+        memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+
+    if (pg_reduce_scatter(sendbuf, recvbuf, count, datatype, op, pg) != 0) {
+        fprintf(stderr, "Reduce Scatter stage failed\n");
+        return -1;
+    }
+    if (pg_run_eager_all_gather(pg, recvbuf, count, datatype) != 0) {
+        fprintf(stderr, "All Gather stage failed\n");
+        return -1;
+    }
+    return 0;
 }
 
 int pg_chunk(void *pg_handle, int count, int *offset, int *nelem)
