@@ -1,0 +1,143 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "pg.h"
+
+static void usage(const char *program)
+{
+    fprintf(stderr,
+            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>]\n",
+            program);
+}
+
+static int build_group_spec(int rank, char **hosts, int host_count,
+                            char **spec_out)
+{
+    size_t length = 32;
+    char *spec;
+    int index;
+
+    for (index = 0; index < host_count; ++index) {
+        length += strlen(hosts[index]) + 1;
+    }
+    spec = malloc(length);
+    if (!spec) {
+        return -1;
+    }
+    snprintf(spec, length, "%d:", rank + 1);
+    for (index = 0; index < host_count; ++index) {
+        strcat(spec, index == 0 ? "" : ",");
+        strcat(spec, hosts[index]);
+    }
+    *spec_out = spec;
+    return 0;
+}
+
+static int check_all_reduce(void *handle, int rank, int nranks, int count)
+{
+    int32_t *sendbuf;
+    int32_t *recvbuf;
+    int index;
+    int source_rank;
+
+    if (count < 0) {
+        return -1;
+    }
+    sendbuf = malloc((size_t)(count > 0 ? count : 1) * sizeof(*sendbuf));
+    recvbuf = malloc((size_t)(count > 0 ? count : 1) * sizeof(*recvbuf));
+    if (!sendbuf || !recvbuf) {
+        free(sendbuf);
+        free(recvbuf);
+        return -1;
+    }
+    for (index = 0; index < count; ++index) {
+        sendbuf[index] = (rank + 1) * 1000 + index;
+    }
+    if (pg_all_reduce(sendbuf, recvbuf, count, PG_INT32, PG_SUM, handle) != 0) {
+        free(sendbuf);
+        free(recvbuf);
+        return -1;
+    }
+    for (index = 0; index < count; ++index) {
+        int32_t expected = 0;
+
+        for (source_rank = 0; source_rank < nranks; ++source_rank) {
+            expected += (source_rank + 1) * 1000 + index;
+        }
+        if (recvbuf[index] != expected) {
+            fprintf(stderr, "FAIL rank=%d index=%d got=%d expected=%d\n",
+                    rank, index, recvbuf[index], expected);
+            free(sendbuf);
+            free(recvbuf);
+            return -1;
+        }
+    }
+    fprintf(stderr, "PASS all_reduce rank=%d count=%d int32 sum\n", rank, count);
+    free(sendbuf);
+    free(recvbuf);
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    char **hosts = NULL;
+    char *spec = NULL;
+    void *handle = NULL;
+    int host_count = 0;
+    int rank = -1;
+    int token = 0;
+    int count = 8;
+    int index;
+    int rc;
+
+    if (argc == 2 && strcmp(argv[1], "-help") == 0) {
+        usage(argv[0]);
+        return EXIT_SUCCESS;
+    }
+
+    for (index = 1; index < argc; ++index) {
+        if (strcmp(argv[index], "-myindex") == 0 && index + 1 < argc) {
+            rank = atoi(argv[++index]) - 1;
+        } else if (strcmp(argv[index], "-list") == 0) {
+            int first = index + 1;
+
+            while (index + 1 < argc && argv[index + 1][0] != '-') {
+                ++index;
+                ++host_count;
+            }
+            hosts = &argv[first];
+        } else if (strcmp(argv[index], "-token") == 0) {
+            token = 1;
+        } else if (strcmp(argv[index], "-check") == 0 && index + 1 < argc) {
+            count = atoi(argv[++index]);
+        } else {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+    }
+    if (rank < 0 || host_count < 2 || rank >= host_count || count < 0) {
+        usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (build_group_spec(rank, hosts, host_count, &spec) != 0 ||
+        connect_process_group(spec, &handle) != 0) {
+        fprintf(stderr, "FAIL connect_process_group\n");
+        free(spec);
+        return EXIT_FAILURE;
+    }
+
+    rc = token ? pg_ring_token(handle, host_count)
+               : check_all_reduce(handle, rank, host_count, count);
+    if (rc == 0 && token) {
+        fprintf(stderr, "PASS token rank=%d laps=%d\n", rank, host_count);
+    }
+    if (pg_close(handle) != 0) {
+        rc = -1;
+    }
+    free(spec);
+    return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+}

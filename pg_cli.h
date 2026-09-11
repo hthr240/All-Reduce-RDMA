@@ -5,7 +5,7 @@
  * usage:
  *  Print the command-line usage for the process-group executable.
  *  The expected invocation is either:
- *      <prog> -myindex <rank> -list <host1> [host2 ...]
+ *      <prog> -myindex <one-based-rank> -list <host1> [host2 ...]
  *  or a single host name in the minimal standalone form.
  */
 void usage(const char *prog);
@@ -16,7 +16,7 @@ void usage(const char *prog);
  *
  *  Parameters:
  *   - argc, argv: command-line arguments
- *   - myindex: selected local rank index
+ *   - myindex: selected local zero-based rank index
  *   - host_list: list of hostnames in rank order
  *   - host_count: number of hosts in the group
  *

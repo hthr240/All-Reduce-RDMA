@@ -43,8 +43,8 @@ Public API
   call it with NULL.
 
 Supported values
-- DATATYPE values are PG_INT32, PG_INT64, PG_FLOAT, and PG_DOUBLE.
-- OPERATION values are PG_SUM, PG_MAX, and PG_MIN.
+- DATATYPE values are PG_INT32 and PG_DOUBLE, matching the reference.
+- OPERATION values are PG_SUM and PG_PROD, matching the reference.
 - Unsupported datatype or operation values are rejected with a nonzero result.
 
 Process-group and command line
@@ -131,3 +131,38 @@ with setup and teardown barriers. The -token action and pg_ring_token API
 provide a one-byte SEND/RECV connectivity smoke test. test_phase4 validates
 the directional resource layout and invalid token arguments; the live token
 test requires two RDMA-capable ranks.
+
+Phase 5 status: reference-compatible reduction primitives
+------------------------------------------------------------
+
+The Phase 5 implementation narrows the collective contract to the reference's
+two datatypes and two operations, then adds hardware-independent helpers for
+element sizes, validation, uneven chunk lengths, chunk offsets, and in-place
+element-wise reduction. test_phase5 covers int32 and double SUM/PROD cases,
+uneven counts, empty chunks, and invalid arguments. RDMA Reduce Scatter and
+All Gather are not part of this phase yet.
+
+The next implementation phase is eager collectives. It is split into
+registered workspace and receive-pool setup, SEND_WITH_IMM transport helpers,
+N - 1 Reduce Scatter rounds, and N - 1 All Gather rounds. The eager path will
+be limited to bounded chunks first; rendezvous RDMA writes and pipelining will
+follow only after eager correctness is established.
+
+Phase 6 status: bounded eager All Reduce
+----------------------------------------
+
+The Phase 6 slice expands the registered buffer into local work space and an
+eager receive area, adds SEND_WITH_IMM posting and split-CQ polling helpers,
+and adds the reference ring schedule for send and receive chunks. The public
+Reduce Scatter entry point copies caller input into registered memory, runs
+N - 1 eager rounds, validates immediate data and byte lengths, reduces received
+chunks with pg_reduce(), and returns this rank's owned reduced chunk. Phase 6
+also implements N - 1 All Gather rounds, installs each received chunk at its
+final work-buffer offset, and copies the complete reduced vector to recvbuf.
+The public All Gather and All Reduce entry points support single-rank and
+in-place calls, uneven chunks, and reject chunks larger than the bounded eager
+receive buffer. Phase 6 tests cover both schedules, public chunk ownership,
+single-rank behavior, eager size limits, and invalid transport arguments.
+
+The implementation still requires live multi-rank validation on RDMA-capable
+Linux hosts for 2-rank and 4-rank SUM/PROD cases before the branch is merged.

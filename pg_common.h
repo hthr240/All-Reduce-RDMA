@@ -5,28 +5,7 @@
 #include <stdint.h>
 #include <infiniband/verbs.h>
 
-/*
- * DATATYPE:
- *  Supported element types for the collective operation.
- *  These values define what the application may reduce and how each element is interpreted.
- */
-typedef enum {
-    PG_INT32 = 0,
-    PG_INT64 = 1,
-    PG_FLOAT = 2,
-    PG_DOUBLE = 3
-} DATATYPE;
-
-/*
- * OPERATION:
- *  Supported reduction operations applied element-wise across ranks.
- *  The implementation will later combine local chunks using the chosen operator.
- */
-typedef enum {
-    PG_SUM = 0,
-    PG_MAX = 1,
-    PG_MIN = 2
-} OPERATION;
+#include "pg.h"
 
 /*
  * pg_metadata_t:
@@ -95,12 +74,14 @@ typedef struct pg_handle {
 } pg_handle_t;
 
 /* Small initial values for the first local Verbs setup milestone. */
-#define PG_BUFFER_SIZE 4096
+#define PG_WORK_BUFFER_SIZE 32768
+#define PG_EAGER_BUFFER_SIZE 4096
+#define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
-#define PG_BOOTSTRAP_RETRIES 50
+#define PG_BOOTSTRAP_RETRIES 600
 
 #define PG_TRACE(rank, ...) do { \
     fprintf(stderr, "[bootstrap rank %d] ", (rank)); \

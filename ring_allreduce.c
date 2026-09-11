@@ -5,10 +5,13 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "pg.h"
 #include "pg_common.h"
 #include "pg_log.h"
 #include "pg_verbs.h"
 #include "pg_bootstrap.h"
+#include "pg_collective.h"
+#include "pg_reduction.h"
 #include "pg_topology.h"
 #include "pg_cli.h"
 
@@ -68,10 +71,22 @@ static void destroy_process_group(pg_handle_t *pg)
 int connect_process_group(char *servername, void **pg_handle)
 {
     pg_handle_t *pg = NULL;
+    char **host_list = NULL;
+    int rank = 0;
+    int host_count = 1;
+    int distributed = 0;
 
     /* Without this output address there is nowhere to return the new handle. */
-    if (!pg_handle) {
+    if (!servername || !pg_handle) {
         fprintf(stderr, "Invalid process-group handle pointer\n");
+        return -1;
+    }
+    *pg_handle = NULL;
+
+    distributed = strchr(servername, ':') != NULL;
+    if (distributed &&
+        parse_process_group_spec(servername, &rank, &host_list, &host_count) != 0) {
+        fprintf(stderr, "Invalid process-group specification\n");
         return -1;
     }
 
@@ -82,31 +97,41 @@ int connect_process_group(char *servername, void **pg_handle)
         return -1;
     }
 
-    /* Rank and group size are placeholders until the topology phase. */
-    pg->rank = 0;
-    pg->size = 1;
+    pg->rank = rank;
+    pg->size = host_count;
     pg->is_connected = 0;
     pg->sock_previous = -1;
     pg->sock_next = -1;
 
     /* Keep an owned hostname copy; the caller retains ownership of its input. */
-    pg->hostname = servername ? strdup(servername) : NULL;
-    if (servername && !pg->hostname) {
+    pg->hostname = strdup(distributed ? host_list[rank] : servername);
+    if (!pg->hostname ||
+        configure_process_group_topology(pg, rank, host_count) != 0) {
         fprintf(stderr, "Could not copy process-group hostname\n");
         destroy_process_group(pg);
+        free_process_group_hosts(host_list, host_count);
         return -1;
     }
 
     /* Initialize all RDMA resources via the verbs module. */
     if (create_rdma_resources(pg) != 0) {
         destroy_process_group(pg);
+        free_process_group_hosts(host_list, host_count);
         return -1;
     }
 
-    /* Only local initialization is complete; remote connection comes later. */
-    pg->is_connected = 1;
+    if (distributed) {
+        if (bootstrap_ring(pg, host_list, host_count) != 0) {
+            destroy_process_group(pg);
+            free_process_group_hosts(host_list, host_count);
+            return -1;
+        }
+    } else {
+        pg->is_connected = 1;
+    }
 
     *pg_handle = pg;
+    free_process_group_hosts(host_list, host_count);
     return 0;
 }
 
@@ -136,20 +161,125 @@ int connect_process_group(char *servername, void **pg_handle)
 int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OPERATION op, void *pg_handle)
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    size_t element_size;
 
-    (void)sendbuf;
-    (void)recvbuf;
-    (void)count;
-    (void)datatype;
-    (void)op;
+    if (!pg || !sendbuf || !recvbuf || count < 0 ||
+        pg_validate_reduction(datatype, op) != 0 ||
+        pg->size <= 0 || pg->rank < 0 || pg->rank >= pg->size) {
+        fprintf(stderr, "Invalid all-reduce arguments\n");
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
 
-    if (!pg) {
-        fprintf(stderr, "Invalid process-group handle\n");
+    element_size = pg_datatype_size(datatype);
+    if (element_size == 0) {
+        fprintf(stderr, "Unsupported datatype for all-reduce\n");
         return -1;
     }
 
-    fprintf(stderr, "pg_all_reduce not implemented in the skeleton build\n");
-    return -1;
+    if (pg->size == 1) {
+        memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+
+    if (pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                    datatype, op) != 0) {
+        fprintf(stderr, "Reduce Scatter stage failed\n");
+        return -1;
+    }
+    if (pg_run_eager_all_gather(pg, recvbuf, count, datatype) != 0) {
+        fprintf(stderr, "All Gather stage failed\n");
+        return -1;
+    }
+    return 0;
+}
+
+int pg_chunk(void *pg_handle, int count, int *offset, int *nelem)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    int chunk;
+
+    if (!pg || count < 0 || !offset || !nelem || pg->size <= 0) {
+        return -1;
+    }
+    chunk = (pg->rank + 1) % pg->size;
+    *offset = pg_chunk_offset(count, pg->size, chunk);
+    *nelem = pg_chunk_nelem(count, pg->size, chunk);
+    return *offset < 0 || *nelem < 0 ? -1 : 0;
+}
+
+int pg_rank(void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    return pg ? pg->rank : -1;
+}
+
+int pg_nranks(void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    return pg ? pg->size : -1;
+}
+
+int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
+                      DATATYPE datatype, OPERATION op, void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+
+    if (!pg || count < 0 || pg_validate_reduction(datatype, op) != 0) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+    if (!sendbuf || !recvbuf) {
+        return -1;
+    }
+    return pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                       datatype, op);
+}
+
+int pg_all_gather(void *sendbuf, void *recvbuf, int count,
+                  DATATYPE datatype, void *pg_handle)
+{
+    pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    size_t element_size;
+    int owned_chunk;
+    int owned_count;
+    int owned_offset;
+
+    if (!pg || !sendbuf || !recvbuf || count < 0 ||
+        pg_datatype_size(datatype) == 0 || pg->size <= 0 ||
+        pg->rank < 0 || pg->rank >= pg->size) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    element_size = pg_datatype_size(datatype);
+    if (pg->size == 1) {
+        memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+    if (!pg->buf || !pg->is_connected) {
+        return -1;
+    }
+
+    owned_chunk = (pg->rank + 1) % pg->size;
+    owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
+    owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
+    if (owned_count < 0 || owned_offset < 0 ||
+        (size_t)count * element_size > PG_WORK_BUFFER_SIZE) {
+        return -1;
+    }
+    memcpy((unsigned char *)pg->buf +
+               (size_t)owned_offset * element_size,
+           sendbuf, (size_t)owned_count * element_size);
+    return pg_run_eager_all_gather(pg, recvbuf, count, datatype);
 }
 
 /* Phase 4 connectivity smoke test; collective data movement comes later. */
@@ -188,6 +318,7 @@ int pg_close(void *pg_handle)
     return 0;
 }
 
+ #ifndef PG_LIBRARY_ONLY
 /*
  * main:
  *  Program entry point.
@@ -210,6 +341,7 @@ int main(int argc, char **argv)
     int rc;
     int run_token = 0;
 
+    pg_log_phase(-1, 0, 1, 6, "Parse process-group configuration");
     PG_LOG_INFO("main", "Starting ring_allreduce (argc=%d)", argc);
 
     for (rc = 1; rc < argc; ++rc) {
@@ -257,6 +389,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    pg_log_phase(myindex >= 0 ? myindex : 0,
+                 myindex >= 0 ? host_count : 1,
+                 2, 6, "Create local RDMA resources");
     /* Create local RDMA state before adding the ring metadata to the handle. */
     PG_LOG_DEBUG("main", "Connecting process group (hostname=%s)", hostname);
     rc = connect_process_group(hostname, &pg_handle);
@@ -267,6 +402,9 @@ int main(int argc, char **argv)
     }
     PG_LOG_INFO("main", "Process group connected successfully");
 
+    pg_log_phase(myindex >= 0 ? myindex : 0,
+                 myindex >= 0 ? host_count : 1,
+                 3, 6, "Configure logical ring topology");
     /* The host-list rank and size now become part of the opaque handle. */
     PG_LOG_DEBUG("main", "Configuring process group topology");
     if (configure_process_group_topology((pg_handle_t *)pg_handle,
@@ -277,10 +415,16 @@ int main(int argc, char **argv)
         free(host_list);
         return 1;
     }
-    PG_LOG_INFO("main", "Topology configured: rank=%d, size=%d",
+    PG_LOG_INFO("main",
+                "Topology ready: rank=%d size=%d previous=%d next=%d",
                 ((pg_handle_t *)pg_handle)->rank,
-                ((pg_handle_t *)pg_handle)->size);
+                ((pg_handle_t *)pg_handle)->size,
+                ((pg_handle_t *)pg_handle)->previous_rank,
+                ((pg_handle_t *)pg_handle)->next_rank);
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 4, 6, "Connect TCP bootstrap ring and RDMA queue pairs");
     if (myindex >= 0 && host_count > 1) {
         PG_LOG_DEBUG("main", "Starting ring bootstrap for multi-rank group");
         if (bootstrap_ring((pg_handle_t *)pg_handle, host_list, host_count) != 0) {
@@ -294,20 +438,30 @@ int main(int argc, char **argv)
         PG_LOG_INFO("main", "Standalone or single-rank mode - skipping bootstrap");
     }
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 5, 6, "Run requested operation");
     if (run_token) {
         PG_LOG_INFO("main", "Running ring token smoke test");
         rc = pg_ring_token(pg_handle, 1);
         PG_LOG_INFO("main", "Ring token smoke test %s", rc == 0 ? "passed" : "failed");
+        pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                     ((pg_handle_t *)pg_handle)->size,
+                     6, 6, "Synchronize and release resources");
         free(host_list);
         pg_close(pg_handle);
         return rc == 0 ? 0 : 1;
     }
 
-    PG_LOG_INFO("main", "Exercise 3 local Verbs state initialized for rank %d",
-                ((pg_handle_t *)pg_handle)->rank);
+    PG_LOG_INFO("main",
+                "No collective action requested; process group is ready and will close");
 
+    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
+                 ((pg_handle_t *)pg_handle)->size,
+                 6, 6, "Synchronize and release resources");
     free(host_list);
     pg_close(pg_handle);
     PG_LOG_INFO("main", "Process group closed successfully");
     return 0;
 }
+#endif /* PG_LIBRARY_ONLY */

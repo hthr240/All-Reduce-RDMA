@@ -12,6 +12,18 @@ void pg_log_set_level(pg_log_level_t level)
     g_log_level = level;
 }
 
+void pg_log_phase(int rank, int size, int phase, int total,
+                  const char *name)
+{
+    if (rank >= 0 && size > 0) {
+        fprintf(stderr, "\n[PHASE %d/%d] [rank %d/%d] %s\n",
+                phase, total, rank, size, name);
+    } else {
+        fprintf(stderr, "\n[PHASE %d/%d] %s\n", phase, total, name);
+    }
+    fflush(stderr);
+}
+
 static const char *level_to_string(pg_log_level_t level)
 {
     switch (level) {
