@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "pg.h"
+#include "pg_log.h"
 
 #define BENCHMARK_MAX_BYTES (4u << 20)
 
@@ -321,6 +322,9 @@ int main(int argc, char **argv)
     if (threshold && setenv("PG_EAGER_THRESHOLD", threshold, 1) != 0) {
         fprintf(stderr, "FAIL setting eager threshold\n");
         return EXIT_FAILURE;
+    }
+    if (benchmark) {
+        pg_log_set_level(PG_LOG_ERROR);
     }
     if (build_group_spec(rank, hosts, host_count, &spec) != 0 ||
         connect_process_group(spec, &handle) != 0) {
