@@ -42,6 +42,9 @@ int ring_token(pg_handle_t *pg, int laps);
 int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id);
 int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
 					uint32_t immediate, uint64_t work_id);
+int post_rendezvous_write(pg_handle_t *pg, const void *buffer, size_t length,
+						  size_t remote_offset, uint32_t immediate,
+						  uint64_t work_id);
 int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc);
 
 /*

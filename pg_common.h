@@ -63,6 +63,10 @@ typedef struct pg_handle {
     struct ibv_mr *mr;
     void *buf;
     size_t buf_size;
+    size_t work_offset;
+    size_t staging_offset;
+    size_t staging_slot_size;
+    size_t eager_offset;
     /* Selected physical port on the opened device. */
     int ib_port;
     /* Remote metadata will be filled during the TCP bootstrap phase. */
@@ -76,7 +80,7 @@ typedef struct pg_handle {
 } pg_handle_t;
 
 /* Small initial values for the first local Verbs setup milestone. */
-#define PG_WORK_BUFFER_SIZE 32768
+#define PG_WORK_BUFFER_SIZE (4u << 20)
 #define PG_EAGER_BUFFER_SIZE 4096
 #define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
@@ -84,6 +88,14 @@ typedef struct pg_handle {
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
 #define PG_BOOTSTRAP_RETRIES 600
+
+#define PG_RDVZ_STAGING_SIZE(pg_size) \
+    ((size_t)((pg_size) - 1) * \
+     (((size_t)PG_WORK_BUFFER_SIZE + (size_t)(pg_size) - 1) / \
+      (size_t)(pg_size)))
+#define PG_REGISTERED_BUFFER_SIZE(pg_size) \
+    ((size_t)PG_WORK_BUFFER_SIZE + PG_RDVZ_STAGING_SIZE(pg_size) + \
+     (size_t)PG_EAGER_BUFFER_SIZE)
 
 #define PG_TRACE(rank, ...) do { \
     fprintf(stderr, "[bootstrap rank %d] ", (rank)); \
