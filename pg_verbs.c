@@ -37,6 +37,7 @@ int create_rdma_resources(pg_handle_t *pg)
 {
     struct ibv_device **device_list = NULL;
     int device_count = 0;
+    size_t buffer_size;
 
     if (!pg) {
         PG_LOG_ERROR("pg_verbs", "Invalid process-group handle");
@@ -87,10 +88,16 @@ int create_rdma_resources(pg_handle_t *pg)
     }
     PG_LOG_DEBUG("pg_verbs", "Protection domain allocated");
 
-    /* This buffer is a placeholder for future send/receive/chunk buffers. */
-    PG_LOG_DEBUG("pg_verbs", "Allocating %zu byte buffer", (size_t)PG_BUFFER_SIZE);
-    pg->buf = calloc(1, PG_BUFFER_SIZE);
-    pg->buf_size = PG_BUFFER_SIZE;
+    pg->work_offset = 0;
+    pg->staging_offset = PG_WORK_BUFFER_SIZE;
+    pg->staging_slot_size = ((size_t)PG_WORK_BUFFER_SIZE +
+                             (size_t)pg->size - 1) / (size_t)pg->size;
+    pg->eager_offset = pg->staging_offset + PG_RDVZ_STAGING_SIZE(pg->size);
+    buffer_size = PG_REGISTERED_BUFFER_SIZE(pg->size);
+
+    PG_LOG_DEBUG("pg_verbs", "Allocating %zu byte registered buffer", buffer_size);
+    pg->buf = calloc(1, buffer_size);
+    pg->buf_size = buffer_size;
     if (!pg->buf) {
         PG_LOG_ERROR("pg_verbs", "Could not allocate process-group buffer");
         return -1;
@@ -326,7 +333,7 @@ int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id)
     }
 
     memset(&sge, 0, sizeof(sge));
-    sge.addr = (uintptr_t)((unsigned char *)pg->buf + PG_WORK_BUFFER_SIZE);
+    sge.addr = (uintptr_t)((unsigned char *)pg->buf + pg->eager_offset);
     sge.length = PG_EAGER_BUFFER_SIZE;
     sge.lkey = pg->mr->lkey;
     memset(&wr, 0, sizeof(wr));
@@ -369,6 +376,43 @@ int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
     if (ibv_post_send(pg->qp_send, &wr, &bad_wr) != 0) {
         PG_LOG_ERROR("pg_verbs", "Could not post eager send: bytes=%zu imm=0x%x",
                      length, immediate);
+        return -1;
+    }
+    return 0;
+}
+
+int post_rendezvous_write(pg_handle_t *pg, const void *buffer, size_t length,
+                          size_t remote_offset, uint32_t immediate,
+                          uint64_t work_id)
+{
+    struct ibv_sge sge;
+    struct ibv_send_wr wr;
+    struct ibv_send_wr *bad_wr = NULL;
+
+    if (!pg || !pg->qp_send || !pg->mr || !pg->buf || !buffer ||
+        length > PG_WORK_BUFFER_SIZE || remote_offset > pg->buf_size ||
+        length > pg->buf_size - remote_offset ||
+        pg->next_peer.buffer_addr == 0 || pg->next_peer.rkey == 0) {
+        return -1;
+    }
+
+    memset(&sge, 0, sizeof(sge));
+    sge.addr = (uintptr_t)buffer;
+    sge.length = (uint32_t)length;
+    sge.lkey = pg->mr->lkey;
+    memset(&wr, 0, sizeof(wr));
+    wr.wr_id = work_id;
+    wr.sg_list = &sge;
+    wr.num_sge = length == 0 ? 0 : 1;
+    wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    wr.send_flags = IBV_SEND_SIGNALED;
+    wr.imm_data = immediate;
+    wr.wr.rdma.remote_addr = pg->next_peer.buffer_addr + remote_offset;
+    wr.wr.rdma.rkey = pg->next_peer.rkey;
+    if (ibv_post_send(pg->qp_send, &wr, &bad_wr) != 0) {
+        PG_LOG_ERROR("pg_verbs",
+                     "Could not post rendezvous write: bytes=%zu offset=%zu imm=0x%x",
+                     length, remote_offset, immediate);
         return -1;
     }
     return 0;
