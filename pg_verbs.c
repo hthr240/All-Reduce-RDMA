@@ -370,9 +370,6 @@ int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
     wr.opcode = IBV_WR_SEND_WITH_IMM;
     wr.send_flags = IBV_SEND_SIGNALED;
     wr.imm_data = immediate;
-    if (length <= 256) {
-        wr.send_flags |= IBV_SEND_INLINE;
-    }
     if (ibv_post_send(pg->qp_send, &wr, &bad_wr) != 0) {
         PG_LOG_ERROR("pg_verbs", "Could not post eager send: bytes=%zu imm=0x%x",
                      length, immediate);
