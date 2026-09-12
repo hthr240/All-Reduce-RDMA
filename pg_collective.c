@@ -349,7 +349,6 @@ int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     size_t total_bytes;
     uint32_t sequence;
     size_t segment_count;
-    size_t segment_count;
     int step;
 
     if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
@@ -548,6 +547,7 @@ int pg_run_rendezvous_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     size_t element_size;
     size_t total_bytes;
     uint32_t sequence;
+    size_t segment_count;
     int step;
 
     if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
