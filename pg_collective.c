@@ -61,6 +61,58 @@ static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
     return 0;
 }
 
+static int wait_for_rendezvous_round(pg_handle_t *pg, uint32_t expected_imm,
+                                     size_t expected_bytes)
+{
+    struct ibv_wc recv_wc;
+    struct ibv_wc send_wc;
+    int got_recv = 0;
+    int got_send = 0;
+
+    while (!got_recv || !got_send) {
+        int count;
+
+        if (!got_recv) {
+            count = poll_eager_completion(pg, 1, &recv_wc);
+            if (count < 0) {
+                return -1;
+            }
+            if (count == 1) {
+                if (recv_wc.status != IBV_WC_SUCCESS ||
+                    recv_wc.opcode != IBV_WC_RECV_RDMA_WITH_IMM ||
+                    recv_wc.imm_data != expected_imm ||
+                    recv_wc.byte_len != expected_bytes) {
+                    PG_LOG_ERROR("pg_collective",
+                                 "Invalid rendezvous receive completion: status=%s opcode=%d imm=0x%x bytes=%u expected_imm=0x%x expected_bytes=%zu",
+                                 ibv_wc_status_str(recv_wc.status),
+                                 recv_wc.opcode, recv_wc.imm_data,
+                                 recv_wc.byte_len, expected_imm,
+                                 expected_bytes);
+                    return -1;
+                }
+                got_recv = 1;
+            }
+        }
+
+        if (!got_send) {
+            count = poll_eager_completion(pg, 0, &send_wc);
+            if (count < 0) {
+                return -1;
+            }
+            if (count == 1) {
+                if (send_wc.status != IBV_WC_SUCCESS) {
+                    PG_LOG_ERROR("pg_collective",
+                                 "Rendezvous send completion failed: status=%s",
+                                 ibv_wc_status_str(send_wc.status));
+                    return -1;
+                }
+                got_send = 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static size_t eager_segment_count(int count, int nranks, size_t element_size)
 {
     size_t largest_chunk_bytes;
@@ -323,7 +375,8 @@ int pg_run_rendezvous_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
                                   send_bytes, staging_offset,
                                   PG_EAGER_IMM(sequence, step, 0),
                                   (uint64_t)step) != 0 ||
-            wait_for_eager_round(pg, PG_EAGER_IMM(sequence, step, 0), 0) != 0 ||
+            wait_for_rendezvous_round(pg, PG_EAGER_IMM(sequence, step, 0),
+                                      receive_bytes) != 0 ||
             pg_reduce((unsigned char *)pg->buf + pg->work_offset +
                           (size_t)receive_offset * element_size,
                       (unsigned char *)pg->buf + staging_offset,
@@ -379,6 +432,7 @@ int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
         int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
         int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
         size_t send_bytes;
+        size_t receive_bytes;
         size_t remote_offset;
 
         if (send_count < 0 || receive_count < 0 || send_offset < 0 ||
@@ -386,6 +440,7 @@ int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
             return -1;
         }
         send_bytes = (size_t)send_count * element_size;
+        receive_bytes = (size_t)receive_count * element_size;
         remote_offset = pg->work_offset + (size_t)send_offset * element_size;
         if (post_eager_receive(pg, 0, (uint64_t)step) != 0 ||
             post_rendezvous_write(pg,
@@ -394,9 +449,10 @@ int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
                                   send_bytes, remote_offset,
                                   PG_EAGER_IMM(sequence, pg->size - 1 + step, 0),
                                   (uint64_t)step) != 0 ||
-            wait_for_eager_round(pg,
-                                 PG_EAGER_IMM(sequence, pg->size - 1 + step, 0),
-                                 0) != 0) {
+            wait_for_rendezvous_round(pg,
+                                      PG_EAGER_IMM(sequence, pg->size - 1 + step,
+                                                   0),
+                                      receive_bytes) != 0) {
             PG_LOG_ERROR("pg_collective",
                          "Rendezvous All Gather failed at round %d", step);
             return -1;
