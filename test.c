@@ -5,14 +5,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "pg.h"
+
+#define BENCHMARK_MAX_BYTES (4u << 20)
 
 static void usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>] [-int-only] [-mode auto|eager|rdvz] [-nopipe]\n",
+            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count> | -bench] [-repeat <count>] [-int-only] [-mode auto|eager|rdvz] [-nopipe] [-dtype int32|double] [-op sum|prod] [-iters <count>] [-threshold <bytes>]\n",
             program);
+}
+
+static double monotonic_seconds(void)
+{
+    struct timespec timestamp;
+
+    clock_gettime(CLOCK_MONOTONIC, &timestamp);
+    return (double)timestamp.tv_sec + (double)timestamp.tv_nsec / 1e9;
+}
+
+static int benchmark_iterations(size_t bytes)
+{
+    if (bytes <= 4096) {
+        return 2000;
+    }
+    if (bytes <= 262144) {
+        return 500;
+    }
+    return 100;
 }
 
 static int build_group_spec(int rank, char **hosts, int host_count,
@@ -132,6 +154,69 @@ static int check_double_product_in_place(void *handle, int rank, int nranks,
     return 0;
 }
 
+static int run_benchmark(void *handle, int rank, DATATYPE datatype,
+                         OPERATION operation, int iterations_override)
+{
+    size_t element_size = datatype == PG_INT32 ? sizeof(int32_t) : sizeof(double);
+    void *sendbuf = malloc(BENCHMARK_MAX_BYTES);
+    void *recvbuf = malloc(BENCHMARK_MAX_BYTES);
+    size_t bytes;
+    size_t index;
+
+    if (!sendbuf || !recvbuf) {
+        free(sendbuf);
+        free(recvbuf);
+        return -1;
+    }
+    for (index = 0; index < BENCHMARK_MAX_BYTES / element_size; ++index) {
+        if (datatype == PG_INT32) {
+            ((int32_t *)sendbuf)[index] = operation == PG_SUM ? rank + 1 : 1;
+        } else {
+            ((double *)sendbuf)[index] = operation == PG_SUM ?
+                (double)(rank + 1) : 1.0;
+        }
+    }
+
+    for (bytes = 8; bytes <= BENCHMARK_MAX_BYTES; bytes <<= 1) {
+        int count = (int)(bytes / element_size);
+        int iterations = iterations_override > 0 ? iterations_override :
+                         benchmark_iterations(bytes);
+        int warmups = iterations / 10 > 10 ? iterations / 10 : 10;
+        double started;
+        double latency_us;
+        int iteration;
+
+        for (iteration = 0; iteration < warmups; ++iteration) {
+            if (pg_all_reduce(sendbuf, recvbuf, count, datatype, operation,
+                              handle) != 0) {
+                goto fail;
+            }
+        }
+        started = monotonic_seconds();
+        for (iteration = 0; iteration < iterations; ++iteration) {
+            if (pg_all_reduce(sendbuf, recvbuf, count, datatype, operation,
+                              handle) != 0) {
+                goto fail;
+            }
+        }
+        latency_us = (monotonic_seconds() - started) * 1e6 / iterations;
+        if (rank == 0) {
+            printf("%zu\t%.3f\tusec\n", bytes, latency_us);
+            fflush(stdout);
+        }
+    }
+
+    free(sendbuf);
+    free(recvbuf);
+    return 0;
+
+fail:
+    fprintf(stderr, "Benchmark all-reduce failed at %zu bytes\n", bytes);
+    free(sendbuf);
+    free(recvbuf);
+    return -1;
+}
+
 int main(int argc, char **argv)
 {
     char **hosts = NULL;
@@ -140,11 +225,16 @@ int main(int argc, char **argv)
     int host_count = 0;
     int rank = -1;
     int token = 0;
+    int benchmark = 0;
     int int_only = 0;
     int count = 8;
     int repeat = 1;
+    int iterations = -1;
     int no_pipeline = 0;
     const char *mode = "auto";
+    const char *threshold = NULL;
+    DATATYPE benchmark_datatype = PG_DOUBLE;
+    OPERATION benchmark_operation = PG_SUM;
     int index;
     int rc;
 
@@ -166,8 +256,14 @@ int main(int argc, char **argv)
             hosts = &argv[first];
         } else if (strcmp(argv[index], "-token") == 0) {
             token = 1;
+            benchmark = 0;
         } else if (strcmp(argv[index], "-check") == 0 && index + 1 < argc) {
             count = atoi(argv[++index]);
+            token = 0;
+            benchmark = 0;
+        } else if (strcmp(argv[index], "-bench") == 0) {
+            benchmark = 1;
+            token = 0;
         } else if (strcmp(argv[index], "-repeat") == 0 && index + 1 < argc) {
             repeat = atoi(argv[++index]);
         } else if (strcmp(argv[index], "-int-only") == 0) {
@@ -176,13 +272,39 @@ int main(int argc, char **argv)
             mode = argv[++index];
         } else if (strcmp(argv[index], "-nopipe") == 0) {
             no_pipeline = 1;
+        } else if (strcmp(argv[index], "-dtype") == 0 && index + 1 < argc) {
+            const char *name = argv[++index];
+
+            if (strcmp(name, "int32") == 0) {
+                benchmark_datatype = PG_INT32;
+            } else if (strcmp(name, "double") == 0) {
+                benchmark_datatype = PG_DOUBLE;
+            } else {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(argv[index], "-op") == 0 && index + 1 < argc) {
+            const char *name = argv[++index];
+
+            if (strcmp(name, "sum") == 0) {
+                benchmark_operation = PG_SUM;
+            } else if (strcmp(name, "prod") == 0) {
+                benchmark_operation = PG_PROD;
+            } else {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+        } else if (strcmp(argv[index], "-iters") == 0 && index + 1 < argc) {
+            iterations = atoi(argv[++index]);
+        } else if (strcmp(argv[index], "-threshold") == 0 && index + 1 < argc) {
+            threshold = argv[++index];
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
         }
     }
     if (rank < 0 || host_count < 2 || rank >= host_count || count < 0 ||
-        repeat < 1 ||
+        repeat < 1 || iterations == 0 || iterations < -1 ||
         (strcmp(mode, "auto") != 0 && strcmp(mode, "eager") != 0 &&
          strcmp(mode, "rdvz") != 0)) {
         usage(argv[0]);
@@ -196,6 +318,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL setting pipeline mode\n");
         return EXIT_FAILURE;
     }
+    if (threshold && setenv("PG_EAGER_THRESHOLD", threshold, 1) != 0) {
+        fprintf(stderr, "FAIL setting eager threshold\n");
+        return EXIT_FAILURE;
+    }
     if (build_group_spec(rank, hosts, host_count, &spec) != 0 ||
         connect_process_group(spec, &handle) != 0) {
         fprintf(stderr, "FAIL connect_process_group\n");
@@ -203,9 +329,11 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    rc = token ? pg_ring_token(handle, host_count)
-               : check_all_reduce(handle, rank, host_count, count, repeat);
-    if (rc == 0 && !token && !int_only) {
+    rc = token ? pg_ring_token(handle, host_count) :
+         benchmark ? run_benchmark(handle, rank, benchmark_datatype,
+                                   benchmark_operation, iterations) :
+         check_all_reduce(handle, rank, host_count, count, repeat);
+    if (rc == 0 && !token && !benchmark && !int_only) {
         rc = check_double_product_in_place(handle, rank, host_count, count,
                                            repeat);
     }

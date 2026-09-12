@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +49,7 @@ static int configure_transport_mode(pg_handle_t *pg)
 {
     const char *mode;
     const char *no_pipeline;
+    const char *threshold;
 
     if (!pg) {
         return -1;
@@ -55,6 +58,21 @@ static int configure_transport_mode(pg_handle_t *pg)
     pg->eager_threshold = PG_EAGER_THRESHOLD;
     no_pipeline = getenv("PG_NOPIPE");
     pg->pipeline_enabled = !no_pipeline || strcmp(no_pipeline, "1") != 0;
+    threshold = getenv("PG_EAGER_THRESHOLD");
+    if (threshold) {
+        char *end = NULL;
+        unsigned long long value;
+
+        errno = 0;
+        value = strtoull(threshold, &end, 10);
+        if (errno != 0 || threshold[0] == '-' || end == threshold ||
+            *end != '\0' || value > SIZE_MAX) {
+            fprintf(stderr, "Invalid PG_EAGER_THRESHOLD value: %s\n",
+                    threshold);
+            return -1;
+        }
+        pg->eager_threshold = (size_t)value;
+    }
     mode = getenv("PG_MODE");
     if (!mode || strcmp(mode, "auto") == 0) {
         return 0;
