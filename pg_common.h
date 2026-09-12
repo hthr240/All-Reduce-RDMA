@@ -27,6 +27,12 @@ typedef struct {
     uint32_t rkey;
 } pg_metadata_t;
 
+typedef enum {
+    PG_TRANSPORT_AUTO = 0,
+    PG_TRANSPORT_EAGER,
+    PG_TRANSPORT_RDVZ
+} pg_transport_mode_t;
+
 /*
  * pg_handle_t:
  *  Opaque process-group state for one rank.
@@ -67,6 +73,8 @@ typedef struct pg_handle {
     size_t staging_offset;
     size_t staging_slot_size;
     size_t eager_offset;
+    pg_transport_mode_t transport_mode;
+    size_t eager_threshold;
     /* Selected physical port on the opened device. */
     int ib_port;
     /* Remote metadata will be filled during the TCP bootstrap phase. */
@@ -82,6 +90,7 @@ typedef struct pg_handle {
 /* Small initial values for the first local Verbs setup milestone. */
 #define PG_WORK_BUFFER_SIZE (4u << 20)
 #define PG_EAGER_BUFFER_SIZE 4096
+#define PG_EAGER_THRESHOLD (16u << 10)
 #define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8

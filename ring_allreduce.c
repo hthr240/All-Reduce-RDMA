@@ -43,6 +43,31 @@ static void destroy_process_group(pg_handle_t *pg)
     free(pg);
 }
 
+static int configure_transport_mode(pg_handle_t *pg)
+{
+    const char *mode;
+
+    if (!pg) {
+        return -1;
+    }
+    pg->transport_mode = PG_TRANSPORT_AUTO;
+    pg->eager_threshold = PG_EAGER_THRESHOLD;
+    mode = getenv("PG_MODE");
+    if (!mode || strcmp(mode, "auto") == 0) {
+        return 0;
+    }
+    if (strcmp(mode, "eager") == 0) {
+        pg->transport_mode = PG_TRANSPORT_EAGER;
+        return 0;
+    }
+    if (strcmp(mode, "rdvz") == 0) {
+        pg->transport_mode = PG_TRANSPORT_RDVZ;
+        return 0;
+    }
+    fprintf(stderr, "Invalid PG_MODE value: %s\n", mode);
+    return -1;
+}
+
 /*
  * connect_process_group:
  *  Initialize the local process-group handle and local RDMA resources.
@@ -102,6 +127,11 @@ int connect_process_group(char *servername, void **pg_handle)
     pg->is_connected = 0;
     pg->sock_previous = -1;
     pg->sock_next = -1;
+    if (configure_transport_mode(pg) != 0) {
+        destroy_process_group(pg);
+        free_process_group_hosts(host_list, host_count);
+        return -1;
+    }
 
     /* Keep an owned hostname copy; the caller retains ownership of its input. */
     pg->hostname = strdup(distributed ? host_list[rank] : servername);
@@ -162,6 +192,8 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
     size_t element_size;
+    size_t largest_chunk_bytes;
+    int use_rendezvous;
 
     if (!pg || !sendbuf || !recvbuf || count < 0 ||
         pg_validate_reduction(datatype, op) != 0 ||
@@ -181,6 +213,21 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 
     if (pg->size == 1) {
         memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+
+    largest_chunk_bytes = (size_t)((count + pg->size - 1) / pg->size) *
+                          element_size;
+    use_rendezvous = pg->transport_mode == PG_TRANSPORT_RDVZ ||
+                     (pg->transport_mode == PG_TRANSPORT_AUTO &&
+                      largest_chunk_bytes > pg->eager_threshold);
+    if (use_rendezvous) {
+        if (pg_run_rendezvous_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                             datatype, op) != 0 ||
+            pg_run_rendezvous_all_gather(pg, recvbuf, count, datatype) != 0) {
+            fprintf(stderr, "Rendezvous all-reduce failed\n");
+            return -1;
+        }
         return 0;
     }
 

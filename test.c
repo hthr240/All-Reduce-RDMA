@@ -11,7 +11,7 @@
 static void usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>] [-int-only]\n",
+            "Usage: %s -myindex <one-based-rank> -list <host1> <host2> [host...] [-token | -check <count>] [-repeat <count>] [-int-only] [-mode auto|eager|rdvz]\n",
             program);
 }
 
@@ -143,6 +143,7 @@ int main(int argc, char **argv)
     int int_only = 0;
     int count = 8;
     int repeat = 1;
+    const char *mode = "auto";
     int index;
     int rc;
 
@@ -170,14 +171,22 @@ int main(int argc, char **argv)
             repeat = atoi(argv[++index]);
         } else if (strcmp(argv[index], "-int-only") == 0) {
             int_only = 1;
+        } else if (strcmp(argv[index], "-mode") == 0 && index + 1 < argc) {
+            mode = argv[++index];
         } else {
             usage(argv[0]);
             return EXIT_FAILURE;
         }
     }
     if (rank < 0 || host_count < 2 || rank >= host_count || count < 0 ||
-        repeat < 1) {
+        repeat < 1 ||
+        (strcmp(mode, "auto") != 0 && strcmp(mode, "eager") != 0 &&
+         strcmp(mode, "rdvz") != 0)) {
         usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (setenv("PG_MODE", mode, 1) != 0) {
+        fprintf(stderr, "FAIL setting protocol mode\n");
         return EXIT_FAILURE;
     }
     if (build_group_spec(rank, hosts, host_count, &spec) != 0 ||
