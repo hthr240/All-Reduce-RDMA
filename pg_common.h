@@ -75,6 +75,7 @@ typedef struct pg_handle {
     size_t eager_offset;
     pg_transport_mode_t transport_mode;
     size_t eager_threshold;
+    int pipeline_enabled;
     /* Selected physical port on the opened device. */
     int ib_port;
     /* Remote metadata will be filled during the TCP bootstrap phase. */
@@ -91,6 +92,7 @@ typedef struct pg_handle {
 #define PG_WORK_BUFFER_SIZE (4u << 20)
 #define PG_EAGER_BUFFER_SIZE 4096
 #define PG_EAGER_THRESHOLD (16u << 10)
+#define PG_RDVZ_SEGMENT_SIZE (128u << 10)
 #define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8
