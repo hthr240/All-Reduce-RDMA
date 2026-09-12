@@ -46,12 +46,15 @@ static void destroy_process_group(pg_handle_t *pg)
 static int configure_transport_mode(pg_handle_t *pg)
 {
     const char *mode;
+    const char *no_pipeline;
 
     if (!pg) {
         return -1;
     }
     pg->transport_mode = PG_TRANSPORT_AUTO;
     pg->eager_threshold = PG_EAGER_THRESHOLD;
+    no_pipeline = getenv("PG_NOPIPE");
+    pg->pipeline_enabled = !no_pipeline || strcmp(no_pipeline, "1") != 0;
     mode = getenv("PG_MODE");
     if (!mode || strcmp(mode, "auto") == 0) {
         return 0;
