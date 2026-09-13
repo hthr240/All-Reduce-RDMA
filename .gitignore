@@ -6,6 +6,8 @@
 !Makefile
 !report.txt
 !REFACTORING.md
+!BENCHMARK_REPORT.md
+!results-*.tsv
 !tests/
 tests/*
 !tests/*.c
