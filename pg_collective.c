@@ -6,11 +6,6 @@
 #include "pg_reduction.h"
 #include "pg_verbs.h"
 
-#define PG_EAGER_IMM(seq, round, segment) \
-    ((((uint32_t)(seq) & 0xffu) << 24) | \
-    (((uint32_t)(round) & 0xffu) << 16) | \
-    ((uint32_t)(segment) & 0xffffu))
-
 static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
                                 size_t expected_bytes)
 {
