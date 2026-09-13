@@ -89,6 +89,18 @@ static int configure_transport_mode(pg_handle_t *pg)
     return -1;
 }
 
+static int use_rendezvous_transport(const pg_handle_t *pg, int count,
+                                    size_t element_size)
+{
+    size_t largest_chunk_bytes;
+
+    largest_chunk_bytes = ((size_t)count + (size_t)pg->size - 1) /
+                          (size_t)pg->size * element_size;
+    return pg->transport_mode == PG_TRANSPORT_RDVZ ||
+           (pg->transport_mode == PG_TRANSPORT_AUTO &&
+            largest_chunk_bytes > pg->eager_threshold);
+}
+
 /*
  * connect_process_group:
  *  Initialize the local process-group handle and local RDMA resources.
@@ -213,7 +225,6 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
     size_t element_size;
-    size_t largest_chunk_bytes;
     int use_rendezvous;
 
     if (!pg || !sendbuf || !recvbuf || count < 0 ||
@@ -237,11 +248,7 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
         return 0;
     }
 
-    largest_chunk_bytes = (size_t)((count + pg->size - 1) / pg->size) *
-                          element_size;
-    use_rendezvous = pg->transport_mode == PG_TRANSPORT_RDVZ ||
-                     (pg->transport_mode == PG_TRANSPORT_AUTO &&
-                      largest_chunk_bytes > pg->eager_threshold);
+    use_rendezvous = use_rendezvous_transport(pg, count, element_size);
     if (use_rendezvous) {
         if (pg_run_rendezvous_reduce_scatter(pg, sendbuf, recvbuf, count,
                                              datatype, op) != 0 ||
@@ -296,8 +303,11 @@ int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
                       DATATYPE datatype, OPERATION op, void *pg_handle)
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
+    size_t element_size;
+    int rc;
 
-    if (!pg || count < 0 || pg_validate_reduction(datatype, op) != 0) {
+    if (!pg || count < 0 || pg_validate_reduction(datatype, op) != 0 ||
+        pg->size <= 0 || pg->rank < 0 || pg->rank >= pg->size) {
         return -1;
     }
     if (count == 0) {
@@ -306,8 +316,22 @@ int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
     if (!sendbuf || !recvbuf) {
         return -1;
     }
-    return pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
-                                       datatype, op);
+    element_size = pg_datatype_size(datatype);
+    if (pg->size == 1) {
+        memcpy(recvbuf, sendbuf, (size_t)count * element_size);
+        return 0;
+    }
+    if (use_rendezvous_transport(pg, count, element_size)) {
+        rc = pg_run_rendezvous_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                              datatype, op);
+    } else {
+        rc = pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
+                                         datatype, op);
+    }
+    if (rc == 0) {
+        ++pg->collective_sequence;
+    }
+    return rc;
 }
 
 int pg_all_gather(void *sendbuf, void *recvbuf, int count,
@@ -347,6 +371,9 @@ int pg_all_gather(void *sendbuf, void *recvbuf, int count,
     memcpy((unsigned char *)pg->buf +
                (size_t)owned_offset * element_size,
            sendbuf, (size_t)owned_count * element_size);
+    if (use_rendezvous_transport(pg, count, element_size)) {
+        return pg_run_rendezvous_all_gather(pg, recvbuf, count, datatype);
+    }
     return pg_run_eager_all_gather(pg, recvbuf, count, datatype);
 }
 

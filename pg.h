@@ -14,6 +14,13 @@ typedef enum {
 int connect_process_group(char *servername, void **pg_handle);
 int pg_all_reduce(void *sendbuf, void *recvbuf, int count,
                   DATATYPE datatype, OPERATION op, void *pg_handle);
+int pg_reduce_scatter(void *sendbuf, void *recvbuf, int count,
+                      DATATYPE datatype, OPERATION op, void *pg_handle);
+int pg_all_gather(void *sendbuf, void *recvbuf, int count,
+                  DATATYPE datatype, void *pg_handle);
+int pg_chunk(void *pg_handle, int count, int *offset, int *nelem);
+int pg_rank(void *pg_handle);
+int pg_nranks(void *pg_handle);
 int pg_close(void *pg_handle);
 
 /* Optional diagnostics used by the course test driver. */
