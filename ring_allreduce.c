@@ -14,7 +14,6 @@
 #include "pg_bootstrap.h"
 #include "pg_collective.h"
 #include "pg_reduction.h"
-#include "pg_topology.h"
 #include "pg_cli.h"
 
 /*
@@ -413,7 +412,28 @@ int pg_close(void *pg_handle)
     return 0;
 }
 
- #ifndef PG_LIBRARY_ONLY
+#ifndef PG_LIBRARY_ONLY
+static char *build_process_group_spec(int rank, char **hosts, int host_count)
+{
+    size_t length = 32;
+    char *spec;
+    int index;
+
+    for (index = 0; index < host_count; ++index) {
+        length += strlen(hosts[index]) + 1;
+    }
+    spec = malloc(length);
+    if (!spec) {
+        return NULL;
+    }
+    snprintf(spec, length, "%d:", rank + 1);
+    for (index = 0; index < host_count; ++index) {
+        strcat(spec, index == 0 ? "" : ",");
+        strcat(spec, hosts[index]);
+    }
+    return spec;
+}
+
 /*
  * main:
  *  Program entry point.
@@ -431,12 +451,13 @@ int main(int argc, char **argv)
     char **host_list = NULL;
     int host_count = 0;
     int myindex = -1;
-    char *hostname = NULL;
+    char *group_spec = NULL;
+    const char *connect_target = NULL;
     void *pg_handle = NULL;
     int rc;
     int run_token = 0;
 
-    pg_log_phase(-1, 0, 1, 6, "Parse process-group configuration");
+    pg_log_phase(-1, 0, 1, 4, "Parse process-group configuration");
     PG_LOG_INFO("main", "Starting ring_allreduce (argc=%d)", argc);
 
     for (rc = 1; rc < argc; ++rc) {
@@ -455,7 +476,7 @@ int main(int argc, char **argv)
     rc = parse_rank_and_hosts(argc, argv, &myindex, &host_list, &host_count);
     if (rc != 0) {
         PG_LOG_ERROR("main", "Failed to parse rank and hosts");
-        free(host_list);
+        free_process_group_hosts(host_list, host_count);
         return 1;
     }
 
@@ -464,52 +485,44 @@ int main(int argc, char **argv)
         PG_LOG_INFO("main", "Distributed mode: rank=%d, group_size=%d", myindex, host_count);
         if (validate_host_list(host_list, host_count) != 0) {
             PG_LOG_ERROR("main", "Host list validation failed");
-            free(host_list);
+            free_process_group_hosts(host_list, host_count);
             return 1;
         }
         if (myindex >= host_count) {
             PG_LOG_ERROR("main", "-myindex %d out of range for group size %d", myindex, host_count);
-            free(host_list);
+            free_process_group_hosts(host_list, host_count);
             return 1;
         }
-        hostname = host_list[myindex];
+        group_spec = build_process_group_spec(myindex, host_list, host_count);
+        if (!group_spec) {
+            PG_LOG_ERROR("main", "Could not build process-group specification");
+            free_process_group_hosts(host_list, host_count);
+            return 1;
+        }
+        connect_target = group_spec;
     /* Standalone mode represents a one-rank group for local development. */
     } else if (argc == 2) {
         PG_LOG_INFO("main", "Standalone mode: hostname=%s", argv[1]);
-        hostname = argv[1];
+        connect_target = argv[1];
     } else {
         PG_LOG_ERROR("main", "Invalid argument combination");
         usage(argv[0]);
-        free(host_list);
+        free_process_group_hosts(host_list, host_count);
         return 1;
     }
 
     pg_log_phase(myindex >= 0 ? myindex : 0,
                  myindex >= 0 ? host_count : 1,
-                 2, 6, "Create local RDMA resources");
-    /* Create local RDMA state before adding the ring metadata to the handle. */
-    PG_LOG_DEBUG("main", "Connecting process group (hostname=%s)", hostname);
-    rc = connect_process_group(hostname, &pg_handle);
+                 2, 4, "Create and connect process group");
+    PG_LOG_DEBUG("main", "Connecting process group");
+    rc = connect_process_group((char *)connect_target, &pg_handle);
+    free(group_spec);
     if (rc != 0) {
         PG_LOG_ERROR("main", "Failed to initialize process group");
-        free(host_list);
+        free_process_group_hosts(host_list, host_count);
         return 1;
     }
     PG_LOG_INFO("main", "Process group connected successfully");
-
-    pg_log_phase(myindex >= 0 ? myindex : 0,
-                 myindex >= 0 ? host_count : 1,
-                 3, 6, "Configure logical ring topology");
-    /* The host-list rank and size now become part of the opaque handle. */
-    PG_LOG_DEBUG("main", "Configuring process group topology");
-    if (configure_process_group_topology((pg_handle_t *)pg_handle,
-                                         myindex >= 0 ? myindex : 0,
-                                         myindex >= 0 ? host_count : 1) != 0) {
-        PG_LOG_ERROR("main", "Failed to configure process group topology");
-        pg_close(pg_handle);
-        free(host_list);
-        return 1;
-    }
     PG_LOG_INFO("main",
                 "Topology ready: rank=%d size=%d previous=%d next=%d",
                 ((pg_handle_t *)pg_handle)->rank,
@@ -519,31 +532,15 @@ int main(int argc, char **argv)
 
     pg_log_phase(((pg_handle_t *)pg_handle)->rank,
                  ((pg_handle_t *)pg_handle)->size,
-                 4, 6, "Connect TCP bootstrap ring and RDMA queue pairs");
-    if (myindex >= 0 && host_count > 1) {
-        PG_LOG_DEBUG("main", "Starting ring bootstrap for multi-rank group");
-        if (bootstrap_ring((pg_handle_t *)pg_handle, host_list, host_count) != 0) {
-            PG_LOG_ERROR("main", "Failed to bootstrap ring peers");
-            pg_close(pg_handle);
-            free(host_list);
-            return 1;
-        }
-        PG_LOG_INFO("main", "Ring bootstrap completed successfully");
-    } else {
-        PG_LOG_INFO("main", "Standalone or single-rank mode - skipping bootstrap");
-    }
-
-    pg_log_phase(((pg_handle_t *)pg_handle)->rank,
-                 ((pg_handle_t *)pg_handle)->size,
-                 5, 6, "Run requested operation");
+                 3, 4, "Run requested operation");
     if (run_token) {
         PG_LOG_INFO("main", "Running ring token smoke test");
         rc = pg_ring_token(pg_handle, 1);
         PG_LOG_INFO("main", "Ring token smoke test %s", rc == 0 ? "passed" : "failed");
         pg_log_phase(((pg_handle_t *)pg_handle)->rank,
                      ((pg_handle_t *)pg_handle)->size,
-                     6, 6, "Synchronize and release resources");
-        free(host_list);
+                     4, 4, "Synchronize and release resources");
+        free_process_group_hosts(host_list, host_count);
         pg_close(pg_handle);
         return rc == 0 ? 0 : 1;
     }
@@ -553,8 +550,8 @@ int main(int argc, char **argv)
 
     pg_log_phase(((pg_handle_t *)pg_handle)->rank,
                  ((pg_handle_t *)pg_handle)->size,
-                 6, 6, "Synchronize and release resources");
-    free(host_list);
+                 4, 4, "Synchronize and release resources");
+    free_process_group_hosts(host_list, host_count);
     pg_close(pg_handle);
     PG_LOG_INFO("main", "Process group closed successfully");
     return 0;

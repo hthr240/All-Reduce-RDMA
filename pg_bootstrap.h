@@ -3,6 +3,15 @@
 
 #include "pg_common.h"
 
+/* Validate and parse the ordered host list that defines the logical ring. */
+int validate_host_list(char **host_list, int host_count);
+int parse_process_group_spec(const char *spec, int *rank,
+                             char ***host_list, int *host_count);
+void free_process_group_hosts(char **host_list, int host_count);
+
+/* Store the local rank, group size, and previous/next ring neighbors. */
+int configure_process_group_topology(pg_handle_t *pg, int rank, int size);
+
 /*
  * serialize_metadata / deserialize_metadata:
  *  Convert bootstrap metadata to and from a 48-byte TCP message.
@@ -26,14 +35,6 @@ int deserialize_metadata(const unsigned char wire[PG_METADATA_WIRE_SIZE], pg_met
 int write_full(int fd, const void *buffer, size_t length);
 
 int read_full(int fd, void *buffer, size_t length);
-
-/*
- * metadata_from_process_group:
- *  Extract local metadata from a process group handle.
- *
- *  Queries the port LID, GID, and uses the QP number and MR rkey.
- */
-int metadata_from_process_group(const pg_handle_t *pg, pg_metadata_t *metadata);
 
 /* Extract endpoint metadata for a specific directional QP. */
 int metadata_from_qp(const pg_handle_t *pg, struct ibv_qp *qp,
