@@ -108,11 +108,4 @@ typedef struct pg_handle {
     ((size_t)PG_WORK_BUFFER_SIZE + PG_RDVZ_STAGING_SIZE(pg_size) + \
      (size_t)PG_EAGER_BUFFER_SIZE)
 
-#define PG_TRACE(rank, ...) do { \
-    fprintf(stderr, "[bootstrap rank %d] ", (rank)); \
-    fprintf(stderr, __VA_ARGS__); \
-    fputc('\n', stderr); \
-    fflush(stderr); \
-} while (0)
-
 #endif /* PG_COMMON_H */

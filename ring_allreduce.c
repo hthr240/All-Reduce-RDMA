@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +14,61 @@
 #include "pg_verbs.h"
 #include "pg_bootstrap.h"
 #include "pg_collective.h"
-#include "pg_cli.h"
+
+static pg_log_level_t g_log_level = PG_LOG_INFO;
+
+void pg_log_set_level(pg_log_level_t level)
+{
+    g_log_level = level;
+}
+
+void pg_log_phase(int rank, int size, int phase, int total,
+                  const char *name)
+{
+    if (rank >= 0 && size > 0) {
+        fprintf(stderr, "\n[PHASE %d/%d] [rank %d/%d] %s\n",
+                phase, total, rank, size, name);
+    } else {
+        fprintf(stderr, "\n[PHASE %d/%d] %s\n", phase, total, name);
+    }
+    fflush(stderr);
+}
+
+static const char *log_level_name(pg_log_level_t level)
+{
+    switch (level) {
+        case PG_LOG_DEBUG: return "DEBUG";
+        case PG_LOG_INFO:  return "INFO";
+        case PG_LOG_WARN:  return "WARN";
+        case PG_LOG_ERROR: return "ERROR";
+        default:           return "UNKNOWN";
+    }
+}
+
+void pg_log_impl(pg_log_level_t level, const char *module, const char *file,
+                 int line, const char *fmt, ...)
+{
+    va_list args;
+    const char *filename;
+
+    if (level < g_log_level) {
+        return;
+    }
+
+    filename = strrchr(file, '/');
+    if (!filename) {
+        filename = strrchr(file, '\\');
+    }
+    filename = filename ? filename + 1 : file;
+
+    fprintf(stderr, "[%s] %s:%d (%s) ",
+            log_level_name(level), filename, line, module);
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
 
 /*
  * destroy_process_group:
@@ -412,6 +467,65 @@ int pg_close(void *pg_handle)
 }
 
 #ifndef PG_LIBRARY_ONLY
+static void usage(const char *program)
+{
+    fprintf(stderr,
+            "Usage: %s -myindex <one-based-rank> -list <host1> [host2 ...]\n"
+            "       %s -myindex <one-based-rank> -list <host1> [host2 ...] -token\n"
+            "       %s <hostname>\n",
+            program, program, program);
+}
+
+static int parse_rank_and_hosts(int argc, char **argv, int *rank,
+                                char ***host_list, int *host_count)
+{
+    int index;
+
+    *rank = -1;
+    *host_count = 0;
+    *host_list = NULL;
+
+    for (index = 1; index < argc; ++index) {
+        if (strcmp(argv[index], "-myindex") == 0 && index + 1 < argc) {
+            char *end = NULL;
+            long value = strtol(argv[++index], &end, 10);
+
+            if (end == argv[index] || *end != '\0' ||
+                value < 1 || value > 65536) {
+                fprintf(stderr, "Invalid one-based -myindex value\n");
+                return -1;
+            }
+            *rank = (int)value - 1;
+        } else if (strcmp(argv[index], "-list") == 0) {
+            int first_host = index + 1;
+            int count = 0;
+            char **hosts;
+            int host;
+
+            while (index + 1 < argc && argv[index + 1][0] != '-') {
+                ++index;
+                ++count;
+            }
+            hosts = calloc((size_t)count, sizeof(*hosts));
+            if (!hosts) {
+                fprintf(stderr, "Out of memory while parsing host list\n");
+                return -1;
+            }
+            for (host = 0; host < count; ++host) {
+                hosts[host] = strdup(argv[first_host + host]);
+                if (!hosts[host]) {
+                    free_process_group_hosts(hosts, host);
+                    fprintf(stderr, "Out of memory while copying host list\n");
+                    return -1;
+                }
+            }
+            *host_list = hosts;
+            *host_count = count;
+        }
+    }
+    return 0;
+}
+
 static char *build_process_group_spec(int rank, char **hosts, int host_count)
 {
     size_t length = 32;
