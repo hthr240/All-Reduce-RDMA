@@ -38,6 +38,6 @@ $(TEST_PHASE_TARGETS): test-phase%: tests/test_phase%
 	@printf 'All tests passed for phase %s\n' "$*"
 
 clean:
-	rm -f $(OBJ) $(TARGET) $(COURSE_TEST) $(TEST_TARGETS)
+	rm -f *.o $(TARGET) $(COURSE_TEST) $(TEST_TARGETS)
 
 .PHONY: all check $(TEST_PHASE_TARGETS) clean

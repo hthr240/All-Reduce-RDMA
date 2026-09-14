@@ -6,214 +6,244 @@
 #include "pg_reduction.h"
 #include "pg_verbs.h"
 
-static int wait_for_eager_round(pg_handle_t *pg, uint32_t expected_imm,
-                                size_t expected_bytes)
+typedef struct {
+    int count;
+    DATATYPE datatype;
+    OPERATION operation;
+    pg_transport_mode_t mode;
+    size_t element_size;
+    size_t segment_size;
+    int pipelined;
+    int first_step;
+    int end_step;
+} pg_collective_schedule_t;
+
+static size_t segment_count(size_t bytes, size_t segment_size)
 {
-    struct ibv_wc recv_wc;
-    struct ibv_wc send_wc;
-    int got_recv = 0;
-    int got_send = 0;
+    return bytes == 0 ? 1 : (bytes + segment_size - 1) / segment_size;
+}
 
-    while (!got_recv || !got_send) {
-        int count;
+static size_t segment_length(size_t bytes, size_t segment_size,
+                             size_t segment)
+{
+    size_t offset = segment * segment_size;
+    size_t remaining;
 
-        if (!got_recv) {
-            count = poll_eager_completion(pg, 1, &recv_wc);
-            if (count < 0) {
-                return -1;
-            }
-            if (count == 1) {
-                if (recv_wc.status != IBV_WC_SUCCESS ||
-                    recv_wc.opcode != IBV_WC_RECV ||
-                    recv_wc.imm_data != expected_imm ||
-                    recv_wc.byte_len != expected_bytes) {
-                    PG_LOG_ERROR("pg_collective",
-                                 "Invalid eager receive completion: status=%s imm=0x%x bytes=%u expected_imm=0x%x expected_bytes=%zu",
-                                 ibv_wc_status_str(recv_wc.status),
-                                 recv_wc.imm_data, recv_wc.byte_len,
-                                 expected_imm, expected_bytes);
-                    return -1;
-                }
-                got_recv = 1;
-            }
-        }
-
-        if (!got_send) {
-            count = poll_eager_completion(pg, 0, &send_wc);
-            if (count < 0) {
-                return -1;
-            }
-            if (count == 1) {
-                if (send_wc.status != IBV_WC_SUCCESS) {
-                    PG_LOG_ERROR("pg_collective",
-                                 "Eager send completion failed: status=%s",
-                                 ibv_wc_status_str(send_wc.status));
-                    return -1;
-                }
-                got_send = 1;
-            }
-        }
+    if (offset >= bytes) {
+        return 0;
     }
-    return 0;
+    remaining = bytes - offset;
+    return remaining < segment_size ? remaining : segment_size;
 }
 
-static int wait_for_rendezvous_round(pg_handle_t *pg, uint32_t expected_imm,
-                                     size_t expected_bytes)
+static int step_send_chunk(const pg_handle_t *pg, int step)
 {
-    struct ibv_wc recv_wc;
-    struct ibv_wc send_wc;
-    int got_recv = 0;
-    int got_send = 0;
-
-    while (!got_recv || !got_send) {
-        int count;
-
-        if (!got_recv) {
-            count = poll_eager_completion(pg, 1, &recv_wc);
-            if (count < 0) {
-                return -1;
-            }
-            if (count == 1) {
-                if (recv_wc.status != IBV_WC_SUCCESS ||
-                    recv_wc.opcode != IBV_WC_RECV_RDMA_WITH_IMM ||
-                    recv_wc.imm_data != expected_imm ||
-                    recv_wc.byte_len != expected_bytes) {
-                    PG_LOG_ERROR("pg_collective",
-                                 "Invalid rendezvous receive completion: status=%s opcode=%d imm=0x%x bytes=%u expected_imm=0x%x expected_bytes=%zu",
-                                 ibv_wc_status_str(recv_wc.status),
-                                 recv_wc.opcode, recv_wc.imm_data,
-                                 recv_wc.byte_len, expected_imm,
-                                 expected_bytes);
-                    return -1;
-                }
-                got_recv = 1;
-            }
-        }
-
-        if (!got_send) {
-            count = poll_eager_completion(pg, 0, &send_wc);
-            if (count < 0) {
-                return -1;
-            }
-            if (count == 1) {
-                if (send_wc.status != IBV_WC_SUCCESS) {
-                    PG_LOG_ERROR("pg_collective",
-                                 "Rendezvous send completion failed: status=%s",
-                                 ibv_wc_status_str(send_wc.status));
-                    return -1;
-                }
-                got_send = 1;
-            }
-        }
-    }
-    return 0;
+    return pg_send_chunk(pg->rank, step, pg->size);
 }
 
-static size_t eager_segment_count(int count, int nranks, size_t element_size)
+static int step_receive_chunk(const pg_handle_t *pg, int step)
 {
-    size_t largest_chunk_bytes;
-
-    largest_chunk_bytes = (size_t)((count + nranks - 1) / nranks) *
-                          element_size;
-    return (largest_chunk_bytes + PG_EAGER_BUFFER_SIZE - 1) /
-           PG_EAGER_BUFFER_SIZE;
+    return pg_receive_chunk(pg->rank, step, pg->size);
 }
 
-static size_t rendezvous_segment_count(int count, int nranks,
-                                       size_t element_size)
+static int chunk_geometry(const pg_handle_t *pg,
+                          const pg_collective_schedule_t *schedule,
+                          int chunk, int *offset, size_t *bytes)
 {
-    size_t largest_chunk_bytes;
+    int nelem = pg_chunk_nelem(schedule->count, pg->size, chunk);
+    int element_offset = pg_chunk_offset(schedule->count, pg->size, chunk);
 
-    largest_chunk_bytes = (size_t)((count + nranks - 1) / nranks) *
-                          element_size;
-    return (largest_chunk_bytes + PG_RDVZ_SEGMENT_SIZE - 1) /
-           PG_RDVZ_SEGMENT_SIZE;
-}
-
-static size_t rendezvous_chunk_segment_count(int count, int nranks, int chunk,
-                                             size_t element_size)
-{
-    size_t bytes = (size_t)pg_chunk_nelem(count, nranks, chunk) * element_size;
-
-    return bytes == 0 ? 1 :
-           (bytes + PG_RDVZ_SEGMENT_SIZE - 1) / PG_RDVZ_SEGMENT_SIZE;
-}
-
-static int rendezvous_send_chunk(const pg_handle_t *pg, int step)
-{
-    if (step < pg->size - 1) {
-        return pg_send_chunk(pg->rank, step, pg->size);
-    }
-    return pg_all_gather_send_chunk(pg->rank, step - (pg->size - 1),
-                                    pg->size);
-}
-
-static int rendezvous_receive_chunk(const pg_handle_t *pg, int step)
-{
-    if (step < pg->size - 1) {
-        return pg_receive_chunk(pg->rank, step, pg->size);
-    }
-    return pg_all_gather_receive_chunk(pg->rank, step - (pg->size - 1),
-                                       pg->size);
-}
-
-static int post_rendezvous_segment(pg_handle_t *pg, int count,
-                                   size_t element_size, uint32_t sequence,
-                                   int step, size_t segment_index)
-{
-    int send_chunk = rendezvous_send_chunk(pg, step);
-    int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
-    int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
-    size_t send_bytes;
-    size_t segment_offset = segment_index * PG_RDVZ_SEGMENT_SIZE;
-    size_t segment_bytes;
-    size_t remote_offset;
-
-    if (send_count < 0 || send_offset < 0) {
+    if (nelem < 0 || element_offset < 0) {
         return -1;
     }
-    send_bytes = (size_t)send_count * element_size;
-    segment_bytes = send_bytes > segment_offset ? send_bytes - segment_offset : 0;
-    if (segment_bytes > PG_RDVZ_SEGMENT_SIZE) {
-        segment_bytes = PG_RDVZ_SEGMENT_SIZE;
-    }
-    remote_offset = step < pg->size - 1 ?
-        pg->staging_offset + (size_t)step * pg->staging_slot_size + segment_offset :
-        pg->work_offset + (size_t)send_offset * element_size + segment_offset;
-    return post_rendezvous_write(pg,
-                                 (unsigned char *)pg->buf + pg->work_offset +
-                                     (size_t)send_offset * element_size + segment_offset,
-                                 segment_bytes, remote_offset,
-                                 PG_EAGER_IMM(sequence, step, segment_index),
-                                 (uint64_t)step);
+    *offset = element_offset;
+    *bytes = (size_t)nelem * schedule->element_size;
+    return 0;
 }
 
-static int post_ready_rendezvous_segments(pg_handle_t *pg, int count,
-                                          size_t element_size,
-                                          uint32_t sequence, int first_step,
-                                          int end_step,
-                                          const size_t *received_segments,
-                                          int *next_step,
-                                          size_t *next_segment,
-                                          int *sends_outstanding)
+static size_t chunk_segment_count(const pg_handle_t *pg,
+                                  const pg_collective_schedule_t *schedule,
+                                  int chunk)
 {
-    while (*sends_outstanding < PG_QP_DEPTH && *next_step < end_step) {
-        int send_chunk;
-        size_t segment_count;
+    int nelem = pg_chunk_nelem(schedule->count, pg->size, chunk);
 
-        if (*next_step != first_step &&
-            received_segments[*next_step - first_step - 1] <= *next_segment) {
-            return 0;
+    if (nelem < 0) {
+        return 0;
+    }
+    return segment_count((size_t)nelem * schedule->element_size,
+                         schedule->segment_size);
+}
+
+static int post_receive(pg_handle_t *pg,
+                        const pg_collective_schedule_t *schedule,
+                        uint64_t work_id)
+{
+    size_t receive_size = schedule->mode == PG_TRANSPORT_EAGER ?
+                          PG_EAGER_BUFFER_SIZE : 0;
+
+    return post_eager_receive(pg, receive_size, work_id);
+}
+
+static int post_segment(pg_handle_t *pg,
+                        const pg_collective_schedule_t *schedule,
+                        int step, size_t segment)
+{
+    int chunk = step_send_chunk(pg, step);
+    int element_offset;
+    size_t chunk_bytes;
+    size_t byte_offset = segment * schedule->segment_size;
+    size_t bytes;
+    unsigned char *source;
+    uint32_t immediate;
+    uint64_t work_id;
+
+    if (chunk_geometry(pg, schedule, chunk, &element_offset,
+                       &chunk_bytes) != 0) {
+        return -1;
+    }
+    bytes = segment_length(chunk_bytes, schedule->segment_size, segment);
+    source = (unsigned char *)pg->buf + pg->work_offset +
+             (size_t)element_offset * schedule->element_size + byte_offset;
+    immediate = PG_EAGER_IMM(pg->collective_sequence, step, segment);
+    work_id = ((uint64_t)(uint32_t)step << 32) | segment;
+
+    if (schedule->mode == PG_TRANSPORT_EAGER) {
+        return post_eager_send(pg, source, bytes, immediate, work_id);
+    }
+
+    {
+        size_t remote_offset;
+
+        if (step < pg->size - 1) {
+            remote_offset = pg->staging_offset +
+                            (size_t)step * pg->staging_slot_size +
+                            byte_offset;
+        } else {
+            remote_offset = pg->work_offset +
+                            (size_t)element_offset * schedule->element_size +
+                            byte_offset;
         }
-        send_chunk = rendezvous_send_chunk(pg, *next_step);
-        segment_count = rendezvous_chunk_segment_count(count, pg->size,
-                                                        send_chunk, element_size);
-        if (post_rendezvous_segment(pg, count, element_size, sequence,
-                                    *next_step, *next_segment) != 0) {
+        return post_rendezvous_write(pg, source, bytes, remote_offset,
+                                     immediate, work_id);
+    }
+}
+
+static int validate_receive_completion(
+    const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    const struct ibv_wc *completion, int step, size_t segment,
+    size_t expected_bytes)
+{
+    enum ibv_wc_opcode expected_opcode =
+        schedule->mode == PG_TRANSPORT_EAGER ?
+        IBV_WC_RECV : IBV_WC_RECV_RDMA_WITH_IMM;
+    uint32_t expected_immediate =
+        PG_EAGER_IMM(pg->collective_sequence, step, segment);
+
+    if (completion->status != IBV_WC_SUCCESS ||
+        completion->opcode != expected_opcode ||
+        completion->imm_data != expected_immediate ||
+        completion->byte_len != expected_bytes) {
+        PG_LOG_ERROR(
+            "pg_engine",
+            "Invalid receive completion: step=%d segment=%zu status=%s opcode=%d imm=0x%x bytes=%u expected_opcode=%d expected_imm=0x%x expected_bytes=%zu",
+            step, segment, ibv_wc_status_str(completion->status),
+            completion->opcode, completion->imm_data, completion->byte_len,
+            expected_opcode, expected_immediate, expected_bytes);
+        return -1;
+    }
+    return 0;
+}
+
+static int process_received_segment(
+    pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    const struct ibv_wc *completion, int step, size_t segment)
+{
+    int chunk = step_receive_chunk(pg, step);
+    int element_offset;
+    size_t chunk_bytes;
+    size_t byte_offset = segment * schedule->segment_size;
+    size_t bytes;
+    unsigned char *destination;
+
+    if (chunk_geometry(pg, schedule, chunk, &element_offset,
+                       &chunk_bytes) != 0) {
+        return -1;
+    }
+    bytes = segment_length(chunk_bytes, schedule->segment_size, segment);
+    if (validate_receive_completion(pg, schedule, completion, step, segment,
+                                    bytes) != 0) {
+        return -1;
+    }
+
+    destination = (unsigned char *)pg->buf + pg->work_offset +
+                  (size_t)element_offset * schedule->element_size +
+                  byte_offset;
+    if (step < pg->size - 1) {
+        const unsigned char *source;
+
+        if (schedule->mode == PG_TRANSPORT_EAGER) {
+            source = (const unsigned char *)pg->buf + pg->eager_offset;
+        } else {
+            source = (const unsigned char *)pg->buf + pg->staging_offset +
+                     (size_t)step * pg->staging_slot_size + byte_offset;
+        }
+        return pg_reduce(destination, source,
+                         (int)(bytes / schedule->element_size),
+                         schedule->datatype, schedule->operation);
+    }
+
+    if (schedule->mode == PG_TRANSPORT_EAGER && bytes > 0) {
+        memcpy(destination,
+               (const unsigned char *)pg->buf + pg->eager_offset, bytes);
+    }
+    return 0;
+}
+
+static int send_segment_is_ready(
+    const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    const size_t *received_segments, int step, size_t segment)
+{
+    int previous_index;
+    int previous_chunk;
+    size_t previous_segment_count;
+
+    if (step == schedule->first_step) {
+        return 1;
+    }
+
+    previous_index = step - schedule->first_step - 1;
+    if (schedule->pipelined) {
+        return received_segments[previous_index] > segment;
+    }
+
+    previous_chunk = step_receive_chunk(pg, step - 1);
+    previous_segment_count = chunk_segment_count(pg, schedule,
+                                                 previous_chunk);
+    return previous_segment_count > 0 &&
+           received_segments[previous_index] == previous_segment_count;
+}
+
+static int post_ready_segments(
+    pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    const size_t *received_segments, int *next_step, size_t *next_segment,
+    int *sends_outstanding)
+{
+    while (*sends_outstanding < PG_QP_DEPTH &&
+           *next_step < schedule->end_step) {
+        int chunk = step_send_chunk(pg, *next_step);
+        size_t count = chunk_segment_count(pg, schedule, chunk);
+
+        if (count == 0 ||
+            !send_segment_is_ready(pg, schedule, received_segments,
+                                   *next_step, *next_segment)) {
+            return count == 0 ? -1 : 0;
+        }
+        if (post_segment(pg, schedule, *next_step, *next_segment) != 0) {
             return -1;
         }
         ++*sends_outstanding;
-        if (++*next_segment == segment_count) {
+        ++*next_segment;
+        if (*next_segment == count) {
             *next_segment = 0;
             ++*next_step;
         }
@@ -221,126 +251,137 @@ static int post_ready_rendezvous_segments(pg_handle_t *pg, int count,
     return 0;
 }
 
-static int run_pipelined_rendezvous_steps(pg_handle_t *pg, int count,
-                                          DATATYPE datatype, OPERATION operation,
-                                          int first_step, int end_step)
+static int count_expected_receives(
+    const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    size_t *total_receives)
 {
-    size_t element_size = pg_datatype_size(datatype);
+    int step;
+
+    *total_receives = 0;
+    for (step = schedule->first_step; step < schedule->end_step; ++step) {
+        int chunk = step_receive_chunk(pg, step);
+        int element_offset;
+        size_t bytes;
+        size_t count;
+
+        if (chunk_geometry(pg, schedule, chunk, &element_offset, &bytes) != 0) {
+            return -1;
+        }
+        (void)element_offset;
+        if (schedule->mode == PG_TRANSPORT_RDVZ &&
+            step < pg->size - 1 && bytes > pg->staging_slot_size) {
+            return -1;
+        }
+        count = segment_count(bytes, schedule->segment_size);
+        if (SIZE_MAX - *total_receives < count) {
+            return -1;
+        }
+        *total_receives += count;
+    }
+    return 0;
+}
+
+static int run_collective_steps(pg_handle_t *pg,
+                                const pg_collective_schedule_t *schedule)
+{
+    int step_count = schedule->end_step - schedule->first_step;
     size_t *received_segments;
-    uint32_t sequence = pg->collective_sequence;
-    int step_count = end_step - first_step;
-    size_t total_receives = 0;
+    size_t total_receives;
     size_t posted_receives = 0;
     size_t completed_receives = 0;
-    int next_step = first_step;
-    size_t next_segment = 0;
+    size_t receive_window;
+    int receive_step = schedule->first_step;
+    int next_send_step = schedule->first_step;
+    size_t next_send_segment = 0;
     int sends_outstanding = 0;
-    int step;
-    int receive_step = first_step;
 
-    received_segments = calloc((size_t)step_count, sizeof(*received_segments));
-    if (!received_segments) {
+    received_segments = calloc((size_t)step_count,
+                               sizeof(*received_segments));
+    if (!received_segments ||
+        count_expected_receives(pg, schedule, &total_receives) != 0) {
+        free(received_segments);
         return -1;
     }
-    for (step = first_step; step < end_step; ++step) {
-        int receive_chunk = rendezvous_receive_chunk(pg, step);
 
-        total_receives += rendezvous_chunk_segment_count(count, pg->size,
-                                                          receive_chunk, element_size);
-    }
-    while (posted_receives < total_receives && posted_receives < PG_QP_DEPTH) {
-        if (post_eager_receive(pg, 0, (uint64_t)posted_receives) != 0) {
+    receive_window = schedule->mode == PG_TRANSPORT_EAGER ?
+                     1 : PG_QP_DEPTH;
+    while (posted_receives < total_receives &&
+           posted_receives < receive_window) {
+        if (post_receive(pg, schedule, posted_receives) != 0) {
             free(received_segments);
             return -1;
         }
         ++posted_receives;
     }
-    if (post_ready_rendezvous_segments(pg, count, element_size, sequence,
-                                       first_step, end_step, received_segments,
-                                       &next_step, &next_segment,
-                                       &sends_outstanding) != 0) {
+    if (post_ready_segments(pg, schedule, received_segments,
+                            &next_send_step, &next_send_segment,
+                            &sends_outstanding) != 0) {
         free(received_segments);
         return -1;
     }
 
-    while (completed_receives < total_receives || sends_outstanding > 0) {
-        struct ibv_wc recv_wc;
-        struct ibv_wc send_wc;
-        int completion_count;
-
+    while (completed_receives < total_receives ||
+           sends_outstanding > 0 ||
+           next_send_step < schedule->end_step) {
         if (completed_receives < total_receives) {
-            completion_count = poll_eager_completion(pg, 1, &recv_wc);
-            if (completion_count < 0) {
+            struct ibv_wc completion;
+            int count = poll_eager_completion(pg, 1, &completion);
+
+            if (count < 0) {
                 free(received_segments);
                 return -1;
             }
-            if (completion_count == 1) {
-                int receive_chunk = rendezvous_receive_chunk(pg, receive_step);
-                int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
-                int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
-                size_t receive_bytes = (size_t)receive_count * element_size;
-                size_t segment_offset = received_segments[receive_step - first_step] *
-                                        PG_RDVZ_SEGMENT_SIZE;
-                size_t expected_bytes = receive_bytes > segment_offset ?
-                    receive_bytes - segment_offset : 0;
+            if (count == 1) {
+                int index = receive_step - schedule->first_step;
+                size_t segment = received_segments[index];
+                int chunk = step_receive_chunk(pg, receive_step);
+                size_t expected_segments =
+                    chunk_segment_count(pg, schedule, chunk);
 
-                if (expected_bytes > PG_RDVZ_SEGMENT_SIZE) {
-                    expected_bytes = PG_RDVZ_SEGMENT_SIZE;
-                }
-                if (receive_count < 0 || receive_offset < 0 ||
-                    recv_wc.status != IBV_WC_SUCCESS ||
-                    recv_wc.opcode != IBV_WC_RECV_RDMA_WITH_IMM ||
-                    recv_wc.imm_data != PG_EAGER_IMM(sequence, receive_step,
-                                                      received_segments[receive_step - first_step]) ||
-                    recv_wc.byte_len != expected_bytes) {
-                    PG_LOG_ERROR("pg_collective",
-                                 "Invalid pipelined rendezvous completion at round %d segment %zu",
-                                 receive_step,
-                                 received_segments[receive_step - first_step]);
+                if (expected_segments == 0 || segment >= expected_segments ||
+                    process_received_segment(pg, schedule, &completion,
+                                             receive_step, segment) != 0) {
                     free(received_segments);
                     return -1;
                 }
-                if (receive_step < pg->size - 1 &&
-                    pg_reduce((unsigned char *)pg->buf + pg->work_offset +
-                                  (size_t)receive_offset * element_size + segment_offset,
-                              (unsigned char *)pg->buf + pg->staging_offset +
-                                  (size_t)receive_step * pg->staging_slot_size + segment_offset,
-                              (int)(expected_bytes / element_size), datatype,
-                              operation) != 0) {
-                    free(received_segments);
-                    return -1;
-                }
-                ++received_segments[receive_step - first_step];
+                ++received_segments[index];
                 ++completed_receives;
-                if (received_segments[receive_step - first_step] ==
-                    rendezvous_chunk_segment_count(count, pg->size, receive_chunk,
-                                                    element_size)) {
+                if (received_segments[index] == expected_segments) {
                     ++receive_step;
                 }
-                if (posted_receives < total_receives &&
-                    post_eager_receive(pg, 0, (uint64_t)posted_receives) != 0) {
-                    free(received_segments);
-                    return -1;
-                }
                 if (posted_receives < total_receives) {
+                    if (post_receive(pg, schedule, posted_receives) != 0) {
+                        free(received_segments);
+                        return -1;
+                    }
                     ++posted_receives;
                 }
             }
         }
 
-        completion_count = poll_eager_completion(pg, 0, &send_wc);
-        if (completion_count < 0 ||
-            (completion_count == 1 && send_wc.status != IBV_WC_SUCCESS)) {
-            free(received_segments);
-            return -1;
+        if (sends_outstanding > 0) {
+            struct ibv_wc completion;
+            int count = poll_eager_completion(pg, 0, &completion);
+
+            if (count < 0) {
+                free(received_segments);
+                return -1;
+            }
+            if (count == 1) {
+                if (completion.status != IBV_WC_SUCCESS) {
+                    PG_LOG_ERROR("pg_engine",
+                                 "Send completion failed: status=%s",
+                                 ibv_wc_status_str(completion.status));
+                    free(received_segments);
+                    return -1;
+                }
+                --sends_outstanding;
+            }
         }
-        if (completion_count == 1) {
-            --sends_outstanding;
-        }
-        if (post_ready_rendezvous_segments(pg, count, element_size, sequence,
-                                           first_step, end_step, received_segments,
-                                           &next_step, &next_segment,
-                                           &sends_outstanding) != 0) {
+
+        if (post_ready_segments(pg, schedule, received_segments,
+                                &next_send_step, &next_send_segment,
+                                &sends_outstanding) != 0) {
             free(received_segments);
             return -1;
         }
@@ -350,417 +391,135 @@ static int run_pipelined_rendezvous_steps(pg_handle_t *pg, int count,
     return 0;
 }
 
-int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
-                                void *recvbuf, int count,
-                                DATATYPE datatype, OPERATION operation)
+static int run_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
+                              void *recvbuf, int count, DATATYPE datatype,
+                              OPERATION operation, pg_transport_mode_t mode)
 {
-    size_t element_size;
+    pg_collective_schedule_t schedule;
     size_t total_bytes;
-    uint32_t sequence;
-    size_t segment_count;
-    int step;
+    int owned_chunk;
+    int owned_count;
+    int owned_offset;
 
     if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
         count < 0 || pg_validate_reduction(datatype, operation) != 0 ||
-        pg->size < 2 || pg->rank < 0 || pg->rank >= pg->size) {
-        PG_LOG_ERROR("pg_collective", "Invalid eager Reduce Scatter arguments");
-        return -1;
-    }
-    element_size = pg_datatype_size(datatype);
-    total_bytes = (size_t)count * element_size;
-    if (total_bytes > PG_WORK_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective", "Reduce Scatter input exceeds work buffer: %zu bytes",
-                     total_bytes);
-        return -1;
-    }
-    PG_LOG_INFO("pg_collective",
-                "Starting eager Reduce Scatter: rank=%d size=%d count=%d bytes=%zu",
-                pg->rank, pg->size, count, total_bytes);
-    sequence = pg->collective_sequence;
-    segment_count = eager_segment_count(count, pg->size, element_size);
-    memcpy(pg->buf, sendbuf, total_bytes);
-
-    for (step = 0; step < pg->size - 1; ++step) {
-        int send_chunk = pg_send_chunk(pg->rank, step, pg->size);
-        int receive_chunk = pg_receive_chunk(pg->rank, step, pg->size);
-        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
-        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
-        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
-        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
-        size_t receive_bytes = (size_t)receive_count * element_size;
-        size_t send_bytes = (size_t)send_count * element_size;
-        size_t segment_index;
-
-        PG_LOG_DEBUG("pg_collective",
-                 "Reduce Scatter round %d: send_chunk=%d send_bytes=%zu receive_chunk=%d receive_bytes=%zu",
-                 step, send_chunk, send_bytes, receive_chunk, receive_bytes);
-        if (receive_count < 0 || send_count < 0) {
-            PG_LOG_ERROR("pg_collective", "Eager Reduce Scatter failed at round %d", step);
-            return -1;
-        }
-        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
-            size_t segment_offset = segment_index * PG_EAGER_BUFFER_SIZE;
-            size_t receive_segment_bytes = receive_bytes > segment_offset ?
-                receive_bytes - segment_offset : 0;
-            size_t send_segment_bytes = send_bytes > segment_offset ?
-                send_bytes - segment_offset : 0;
-            int receive_segment_count;
-
-            if (receive_segment_bytes > PG_EAGER_BUFFER_SIZE) {
-                receive_segment_bytes = PG_EAGER_BUFFER_SIZE;
-            }
-            if (send_segment_bytes > PG_EAGER_BUFFER_SIZE) {
-                send_segment_bytes = PG_EAGER_BUFFER_SIZE;
-            }
-            receive_segment_count = (int)(receive_segment_bytes / element_size);
-            if (post_eager_receive(pg, receive_segment_bytes, (uint64_t)step) != 0 ||
-                post_eager_send(pg,
-                                (unsigned char *)pg->buf +
-                                    (size_t)send_offset * element_size + segment_offset,
-                                send_segment_bytes,
-                                PG_EAGER_IMM(sequence, step, segment_index),
-                                (uint64_t)step) != 0 ||
-                wait_for_eager_round(pg,
-                                     PG_EAGER_IMM(sequence, step, segment_index),
-                                     receive_segment_bytes) != 0 ||
-                pg_reduce((unsigned char *)pg->buf +
-                              (size_t)receive_offset * element_size + segment_offset,
-                          (unsigned char *)pg->buf + pg->eager_offset,
-                          receive_segment_count, datatype, operation) != 0) {
-                PG_LOG_ERROR("pg_collective",
-                             "Eager Reduce Scatter failed at round %d segment %zu",
-                             step, segment_index);
-                return -1;
-            }
-        }
-    }
-
-    {
-        int owned_chunk = (pg->rank + 1) % pg->size;
-        int owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
-        int owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
-        memcpy(recvbuf, (unsigned char *)pg->buf +
-                              (size_t)owned_offset * element_size,
-               (size_t)owned_count * element_size);
-        PG_LOG_INFO("pg_collective",
-                "Eager Reduce Scatter complete: owned_chunk=%d offset=%d count=%d",
-                owned_chunk, owned_offset, owned_count);
-    }
-    return 0;
-}
-
-int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
-                           DATATYPE datatype)
-{
-    size_t element_size;
-    size_t total_bytes;
-    uint32_t sequence;
-    size_t segment_count;
-    int step;
-
-    if (!pg || !pg->is_connected || !pg->buf || !recvbuf || count < 0 ||
-        pg_datatype_size(datatype) == 0 || pg->size < 2 ||
-        pg->rank < 0 || pg->rank >= pg->size) {
-        PG_LOG_ERROR("pg_collective", "Invalid eager All Gather arguments");
+        pg->size < 2 || pg->rank < 0 || pg->rank >= pg->size ||
+        (mode != PG_TRANSPORT_EAGER && mode != PG_TRANSPORT_RDVZ)) {
+        PG_LOG_ERROR("pg_engine", "Invalid Reduce Scatter arguments");
         return -1;
     }
     if (count == 0) {
         return 0;
     }
 
-    element_size = pg_datatype_size(datatype);
-    total_bytes = (size_t)count * element_size;
+    schedule.count = count;
+    schedule.datatype = datatype;
+    schedule.operation = operation;
+    schedule.mode = mode;
+    schedule.element_size = pg_datatype_size(datatype);
+    schedule.segment_size = mode == PG_TRANSPORT_EAGER ?
+                            PG_EAGER_BUFFER_SIZE : PG_RDVZ_SEGMENT_SIZE;
+    schedule.pipelined = mode == PG_TRANSPORT_RDVZ && pg->pipeline_enabled;
+    schedule.first_step = 0;
+    schedule.end_step = pg->size - 1;
+
+    total_bytes = (size_t)count * schedule.element_size;
     if (total_bytes > PG_WORK_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective", "All Gather output exceeds work buffer: %zu bytes",
+        PG_LOG_ERROR("pg_engine",
+                     "Reduce Scatter input exceeds work buffer: %zu bytes",
                      total_bytes);
         return -1;
     }
-    PG_LOG_INFO("pg_collective",
-                "Starting eager All Gather: rank=%d size=%d count=%d bytes=%zu",
-                pg->rank, pg->size, count, total_bytes);
-    sequence = pg->collective_sequence;
-    segment_count = eager_segment_count(count, pg->size, element_size);
-    for (step = 0; step < pg->size - 1; ++step) {
-        int send_chunk = pg_all_gather_send_chunk(pg->rank, step, pg->size);
-        int receive_chunk = pg_all_gather_receive_chunk(pg->rank, step,
-                                                        pg->size);
-        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
-        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
-        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
-        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
-        size_t send_bytes = (size_t)send_count * element_size;
-        size_t receive_bytes = (size_t)receive_count * element_size;
-        size_t segment_index;
-
-        if (send_count < 0 || send_offset < 0 ||
-            receive_count < 0 || receive_offset < 0) {
-            PG_LOG_ERROR("pg_collective",
-                         "All Gather schedule produced invalid chunk geometry at step %d",
-                         step);
-            return -1;
-        }
-
-        PG_LOG_DEBUG("pg_collective",
-                     "All Gather round %d: send_chunk=%d send_bytes=%zu receive_chunk=%d receive_bytes=%zu",
-                     step, send_chunk, send_bytes, receive_chunk,
-                     receive_bytes);
-        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
-            size_t segment_offset = segment_index * PG_EAGER_BUFFER_SIZE;
-            size_t receive_segment_bytes = receive_bytes > segment_offset ?
-                receive_bytes - segment_offset : 0;
-            size_t send_segment_bytes = send_bytes > segment_offset ?
-                send_bytes - segment_offset : 0;
-
-            if (receive_segment_bytes > PG_EAGER_BUFFER_SIZE) {
-                receive_segment_bytes = PG_EAGER_BUFFER_SIZE;
-            }
-            if (send_segment_bytes > PG_EAGER_BUFFER_SIZE) {
-                send_segment_bytes = PG_EAGER_BUFFER_SIZE;
-            }
-            if (post_eager_receive(pg, receive_segment_bytes, (uint64_t)step) != 0 ||
-                post_eager_send(pg,
-                                (unsigned char *)pg->buf +
-                                    (size_t)send_offset * element_size + segment_offset,
-                                send_segment_bytes,
-                                PG_EAGER_IMM(sequence, pg->size - 1 + step,
-                                             segment_index),
-                                (uint64_t)step) != 0 ||
-                wait_for_eager_round(pg,
-                                     PG_EAGER_IMM(sequence, pg->size - 1 + step,
-                                                  segment_index),
-                                     receive_segment_bytes) != 0) {
-                PG_LOG_ERROR("pg_collective",
-                             "Eager All Gather failed at round %d segment %zu",
-                             step, segment_index);
-                return -1;
-            }
-            memcpy((unsigned char *)pg->buf +
-                       (size_t)receive_offset * element_size + segment_offset,
-                   (unsigned char *)pg->buf + pg->eager_offset,
-                   receive_segment_bytes);
-        }
-    }
-
-    memcpy(recvbuf, pg->buf, total_bytes);
-    ++pg->collective_sequence;
-    PG_LOG_INFO("pg_collective",
-                "Eager All Gather complete: rank=%d size=%d count=%d bytes=%zu",
-                pg->rank, pg->size, count, total_bytes);
-    return 0;
-}
-
-int pg_run_rendezvous_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
-                                     void *recvbuf, int count,
-                                     DATATYPE datatype, OPERATION operation)
-{
-    size_t element_size;
-    size_t total_bytes;
-    uint32_t sequence;
-    size_t segment_count;
-    int step;
-
-    if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
-        count < 0 || pg_validate_reduction(datatype, operation) != 0 ||
-        pg->size < 2 || pg->rank < 0 || pg->rank >= pg->size) {
-        PG_LOG_ERROR("pg_collective", "Invalid rendezvous Reduce Scatter arguments");
-        return -1;
-    }
-    element_size = pg_datatype_size(datatype);
-    total_bytes = (size_t)count * element_size;
-    if (total_bytes > PG_WORK_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective",
-                     "Rendezvous Reduce Scatter input exceeds work buffer: %zu bytes",
-                     total_bytes);
-        return -1;
-    }
-
-    sequence = pg->collective_sequence;
-    segment_count = rendezvous_segment_count(count, pg->size, element_size);
     memcpy((unsigned char *)pg->buf + pg->work_offset, sendbuf, total_bytes);
-    if (pg->pipeline_enabled) {
-        int owned_chunk;
-        int owned_count;
-        int owned_offset;
-
-        if (run_pipelined_rendezvous_steps(pg, count, datatype, operation, 0,
-                                           pg->size - 1) != 0) {
-            PG_LOG_ERROR("pg_collective", "Pipelined rendezvous Reduce Scatter failed");
-            return -1;
-        }
-        owned_chunk = (pg->rank + 1) % pg->size;
-        owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
-        owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
-        memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset +
-                            (size_t)owned_offset * element_size,
-               (size_t)owned_count * element_size);
-        return 0;
-    }
-    for (step = 0; step < pg->size - 1; ++step) {
-        int send_chunk = pg_send_chunk(pg->rank, step, pg->size);
-        int receive_chunk = pg_receive_chunk(pg->rank, step, pg->size);
-        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
-        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
-        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
-        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
-        size_t send_bytes;
-        size_t receive_bytes;
-        size_t staging_offset;
-        size_t segment_index;
-
-        if (send_count < 0 || receive_count < 0 || send_offset < 0 ||
-            receive_offset < 0) {
-            return -1;
-        }
-        send_bytes = (size_t)send_count * element_size;
-        receive_bytes = (size_t)receive_count * element_size;
-        staging_offset = pg->staging_offset +
-                         (size_t)step * pg->staging_slot_size;
-        if (receive_bytes > pg->staging_slot_size) {
-            PG_LOG_ERROR("pg_collective",
-                         "Rendezvous Reduce Scatter failed at round %d", step);
-            return -1;
-        }
-        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
-            size_t segment_offset = segment_index * PG_RDVZ_SEGMENT_SIZE;
-            size_t send_segment_bytes = send_bytes > segment_offset ?
-                send_bytes - segment_offset : 0;
-            size_t receive_segment_bytes = receive_bytes > segment_offset ?
-                receive_bytes - segment_offset : 0;
-            int receive_segment_count;
-
-            if (send_segment_bytes > PG_RDVZ_SEGMENT_SIZE) {
-                send_segment_bytes = PG_RDVZ_SEGMENT_SIZE;
-            }
-            if (receive_segment_bytes > PG_RDVZ_SEGMENT_SIZE) {
-                receive_segment_bytes = PG_RDVZ_SEGMENT_SIZE;
-            }
-            receive_segment_count = (int)(receive_segment_bytes / element_size);
-            if (post_eager_receive(pg, 0, (uint64_t)step) != 0 ||
-                post_rendezvous_write(pg,
-                                      (unsigned char *)pg->buf + pg->work_offset +
-                                          (size_t)send_offset * element_size + segment_offset,
-                                      send_segment_bytes,
-                                      staging_offset + segment_offset,
-                                      PG_EAGER_IMM(sequence, step, segment_index),
-                                      (uint64_t)step) != 0 ||
-                wait_for_rendezvous_round(pg,
-                                          PG_EAGER_IMM(sequence, step, segment_index),
-                                          receive_segment_bytes) != 0 ||
-                pg_reduce((unsigned char *)pg->buf + pg->work_offset +
-                              (size_t)receive_offset * element_size + segment_offset,
-                          (unsigned char *)pg->buf + staging_offset + segment_offset,
-                          receive_segment_count, datatype, operation) != 0) {
-                PG_LOG_ERROR("pg_collective",
-                             "Rendezvous Reduce Scatter failed at round %d segment %zu",
-                             step, segment_index);
-                return -1;
-            }
-        }
+    if (run_collective_steps(pg, &schedule) != 0) {
+        PG_LOG_ERROR("pg_engine", "Reduce Scatter progress failed");
+        return -1;
     }
 
-    {
-        int owned_chunk = (pg->rank + 1) % pg->size;
-        int owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
-        int owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
-
-        memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset +
-                            (size_t)owned_offset * element_size,
-               (size_t)owned_count * element_size);
+    owned_chunk = (pg->rank + 1) % pg->size;
+    owned_count = pg_chunk_nelem(count, pg->size, owned_chunk);
+    owned_offset = pg_chunk_offset(count, pg->size, owned_chunk);
+    if (owned_count < 0 || owned_offset < 0) {
+        return -1;
     }
+    memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset +
+                        (size_t)owned_offset * schedule.element_size,
+           (size_t)owned_count * schedule.element_size);
     return 0;
 }
 
-int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
-                                 DATATYPE datatype)
+static int run_all_gather(pg_handle_t *pg, void *recvbuf, int count,
+                          DATATYPE datatype, pg_transport_mode_t mode)
 {
-    size_t element_size;
+    pg_collective_schedule_t schedule;
     size_t total_bytes;
-    uint32_t sequence;
-    size_t segment_count;
-    int step;
 
     if (!pg || !pg->is_connected || !pg->buf || !recvbuf || count < 0 ||
-        pg_datatype_size(datatype) == 0 || pg->size < 2 || pg->rank < 0 ||
-        pg->rank >= pg->size) {
-        PG_LOG_ERROR("pg_collective", "Invalid rendezvous All Gather arguments");
+        pg_datatype_size(datatype) == 0 || pg->size < 2 ||
+        pg->rank < 0 || pg->rank >= pg->size ||
+        (mode != PG_TRANSPORT_EAGER && mode != PG_TRANSPORT_RDVZ)) {
+        PG_LOG_ERROR("pg_engine", "Invalid All Gather arguments");
         return -1;
     }
-    element_size = pg_datatype_size(datatype);
-    total_bytes = (size_t)count * element_size;
+    if (count == 0) {
+        return 0;
+    }
+
+    schedule.count = count;
+    schedule.datatype = datatype;
+    schedule.operation = PG_SUM;
+    schedule.mode = mode;
+    schedule.element_size = pg_datatype_size(datatype);
+    schedule.segment_size = mode == PG_TRANSPORT_EAGER ?
+                            PG_EAGER_BUFFER_SIZE : PG_RDVZ_SEGMENT_SIZE;
+    schedule.pipelined = mode == PG_TRANSPORT_RDVZ && pg->pipeline_enabled;
+    schedule.first_step = pg->size - 1;
+    schedule.end_step = 2 * pg->size - 2;
+
+    total_bytes = (size_t)count * schedule.element_size;
     if (total_bytes > PG_WORK_BUFFER_SIZE) {
-        PG_LOG_ERROR("pg_collective",
-                     "Rendezvous All Gather output exceeds work buffer: %zu bytes",
+        PG_LOG_ERROR("pg_engine",
+                     "All Gather output exceeds work buffer: %zu bytes",
                      total_bytes);
         return -1;
     }
-
-    sequence = pg->collective_sequence;
-    segment_count = rendezvous_segment_count(count, pg->size, element_size);
-    if (pg->pipeline_enabled) {
-        if (run_pipelined_rendezvous_steps(pg, count, datatype, PG_SUM,
-                                           pg->size - 1,
-                                           2 * pg->size - 2) != 0) {
-            PG_LOG_ERROR("pg_collective", "Pipelined rendezvous All Gather failed");
-            return -1;
-        }
-        memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset, total_bytes);
-        ++pg->collective_sequence;
-        return 0;
-    }
-    for (step = 0; step < pg->size - 1; ++step) {
-        int send_chunk = pg_all_gather_send_chunk(pg->rank, step, pg->size);
-        int receive_chunk = pg_all_gather_receive_chunk(pg->rank, step,
-                                                        pg->size);
-        int send_count = pg_chunk_nelem(count, pg->size, send_chunk);
-        int receive_count = pg_chunk_nelem(count, pg->size, receive_chunk);
-        int send_offset = pg_chunk_offset(count, pg->size, send_chunk);
-        int receive_offset = pg_chunk_offset(count, pg->size, receive_chunk);
-        size_t send_bytes;
-        size_t receive_bytes;
-        size_t remote_offset;
-        size_t segment_index;
-
-        if (send_count < 0 || receive_count < 0 || send_offset < 0 ||
-            receive_offset < 0) {
-            return -1;
-        }
-        send_bytes = (size_t)send_count * element_size;
-        receive_bytes = (size_t)receive_count * element_size;
-        remote_offset = pg->work_offset + (size_t)send_offset * element_size;
-        for (segment_index = 0; segment_index < segment_count; ++segment_index) {
-            size_t segment_offset = segment_index * PG_RDVZ_SEGMENT_SIZE;
-            size_t send_segment_bytes = send_bytes > segment_offset ?
-                send_bytes - segment_offset : 0;
-            size_t receive_segment_bytes = receive_bytes > segment_offset ?
-                receive_bytes - segment_offset : 0;
-
-            if (send_segment_bytes > PG_RDVZ_SEGMENT_SIZE) {
-                send_segment_bytes = PG_RDVZ_SEGMENT_SIZE;
-            }
-            if (receive_segment_bytes > PG_RDVZ_SEGMENT_SIZE) {
-                receive_segment_bytes = PG_RDVZ_SEGMENT_SIZE;
-            }
-            if (post_eager_receive(pg, 0, (uint64_t)step) != 0 ||
-                post_rendezvous_write(pg,
-                                      (unsigned char *)pg->buf + pg->work_offset +
-                                          (size_t)send_offset * element_size + segment_offset,
-                                      send_segment_bytes, remote_offset + segment_offset,
-                                      PG_EAGER_IMM(sequence, pg->size - 1 + step,
-                                                   segment_index),
-                                      (uint64_t)step) != 0 ||
-                wait_for_rendezvous_round(pg,
-                                          PG_EAGER_IMM(sequence, pg->size - 1 + step,
-                                                       segment_index),
-                                          receive_segment_bytes) != 0) {
-                PG_LOG_ERROR("pg_collective",
-                             "Rendezvous All Gather failed at round %d segment %zu",
-                             step, segment_index);
-                return -1;
-            }
-        }
+    if (run_collective_steps(pg, &schedule) != 0) {
+        PG_LOG_ERROR("pg_engine", "All Gather progress failed");
+        return -1;
     }
 
     memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset, total_bytes);
     ++pg->collective_sequence;
     return 0;
+}
+
+int pg_run_eager_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
+                                void *recvbuf, int count,
+                                DATATYPE datatype, OPERATION operation)
+{
+    return run_reduce_scatter(pg, sendbuf, recvbuf, count, datatype,
+                              operation, PG_TRANSPORT_EAGER);
+}
+
+int pg_run_eager_all_gather(pg_handle_t *pg, void *recvbuf, int count,
+                            DATATYPE datatype)
+{
+    return run_all_gather(pg, recvbuf, count, datatype,
+                          PG_TRANSPORT_EAGER);
+}
+
+int pg_run_rendezvous_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
+                                     void *recvbuf, int count,
+                                     DATATYPE datatype,
+                                     OPERATION operation)
+{
+    return run_reduce_scatter(pg, sendbuf, recvbuf, count, datatype,
+                              operation, PG_TRANSPORT_RDVZ);
+}
+
+int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
+                                 DATATYPE datatype)
+{
+    return run_all_gather(pg, recvbuf, count, datatype,
+                          PG_TRANSPORT_RDVZ);
 }
