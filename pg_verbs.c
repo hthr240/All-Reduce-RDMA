@@ -262,7 +262,7 @@ int ring_token(pg_handle_t *pg, int laps)
             .sg_list = &sge,
             .num_sge = 1,
             .opcode = IBV_WR_SEND,
-            .send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE
+            .send_flags = IBV_SEND_SIGNALED
         };
         struct ibv_send_wr *bad_send = NULL;
         int received = 0;
