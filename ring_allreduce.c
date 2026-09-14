@@ -13,7 +13,6 @@
 #include "pg_verbs.h"
 #include "pg_bootstrap.h"
 #include "pg_collective.h"
-#include "pg_reduction.h"
 #include "pg_cli.h"
 
 /*

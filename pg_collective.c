@@ -1,9 +1,9 @@
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "pg_collective.h"
 #include "pg_log.h"
-#include "pg_reduction.h"
 #include "pg_verbs.h"
 
 typedef struct {
@@ -17,6 +17,102 @@ typedef struct {
     int first_step;
     int end_step;
 } pg_collective_schedule_t;
+
+size_t pg_datatype_size(DATATYPE datatype)
+{
+    switch (datatype) {
+        case PG_INT32:
+            return sizeof(int32_t);
+        case PG_DOUBLE:
+            return sizeof(double);
+        default:
+            return 0;
+    }
+}
+
+int pg_validate_reduction(DATATYPE datatype, OPERATION operation)
+{
+    return pg_datatype_size(datatype) != 0 &&
+           (operation == PG_SUM || operation == PG_PROD) ? 0 : -1;
+}
+
+int pg_chunk_nelem(int count, int nranks, int chunk)
+{
+    if (count < 0 || nranks <= 0 || chunk < 0 || chunk >= nranks) {
+        return -1;
+    }
+    return count / nranks + (chunk < count % nranks ? 1 : 0);
+}
+
+int pg_chunk_offset(int count, int nranks, int chunk)
+{
+    int remainder;
+
+    if (count < 0 || nranks <= 0 || chunk < 0 || chunk >= nranks) {
+        return -1;
+    }
+    remainder = count % nranks;
+    return chunk * (count / nranks) + (chunk < remainder ? chunk : remainder);
+}
+
+int pg_reduce(void *dst, const void *src, int count,
+              DATATYPE datatype, OPERATION operation)
+{
+    int index;
+
+    if (count < 0 || pg_validate_reduction(datatype, operation) != 0 ||
+        (count > 0 && (!dst || !src))) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    if (datatype == PG_INT32) {
+        int32_t *destination = dst;
+        const int32_t *source = src;
+
+        if (operation == PG_SUM) {
+            for (index = 0; index < count; ++index) {
+                destination[index] += source[index];
+            }
+        } else {
+            for (index = 0; index < count; ++index) {
+                destination[index] *= source[index];
+            }
+        }
+    } else {
+        double *destination = dst;
+        const double *source = src;
+
+        if (operation == PG_SUM) {
+            for (index = 0; index < count; ++index) {
+                destination[index] += source[index];
+            }
+        } else {
+            for (index = 0; index < count; ++index) {
+                destination[index] *= source[index];
+            }
+        }
+    }
+    return 0;
+}
+
+int pg_send_chunk(int rank, int step, int nranks)
+{
+    if (nranks <= 0 || rank < 0 || rank >= nranks || step < 0) {
+        return -1;
+    }
+    return ((rank - step) % nranks + nranks) % nranks;
+}
+
+int pg_receive_chunk(int rank, int step, int nranks)
+{
+    if (nranks <= 0 || rank < 0 || rank >= nranks || step < 0) {
+        return -1;
+    }
+    return ((rank - step - 1) % nranks + nranks) % nranks;
+}
 
 static size_t segment_count(size_t bytes, size_t segment_size)
 {

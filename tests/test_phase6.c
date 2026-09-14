@@ -52,8 +52,10 @@ static int test_all_gather_schedule(void)
     int step;
 
     for (step = 0; step < 3; ++step) {
-        if (pg_all_gather_send_chunk(0, step, 4) != expected_send[step] ||
-            pg_all_gather_receive_chunk(0, step, 4) != expected_receive[step]) {
+        int global_step = 3 + step;
+
+        if (pg_send_chunk(0, global_step, 4) != expected_send[step] ||
+            pg_receive_chunk(0, global_step, 4) != expected_receive[step]) {
             fprintf(stderr, "All Gather ring schedule is incorrect\n");
             return -1;
         }

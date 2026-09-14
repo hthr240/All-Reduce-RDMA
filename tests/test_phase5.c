@@ -10,8 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "../pg_reduction.h"
-
 static int test_chunking(void)
 {
     const int expected_lengths[] = {3, 3, 2, 2};
