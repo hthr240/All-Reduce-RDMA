@@ -30,10 +30,10 @@ Performance
 The benchmark measured double-precision sum from 8 bytes to 4 MB after warm-up.
 
 Mode          Nodes   8-byte latency   4 MB latency   Algorithm BW   Ring bus BW
-Eager           2          4.61 us        2.84 ms        11.81 Gbit/s   11.81 Gbit/s
-Rendezvous      2          4.82 us        2.86 ms        11.75 Gbit/s   11.75 Gbit/s
-Eager           4         13.09 us        3.68 ms         9.11 Gbit/s   13.67 Gbit/s
-Rendezvous      4         13.11 us        3.54 ms         9.49 Gbit/s   14.23 Gbit/s
+Eager           2          4.60 us        2.75 ms        12.19 Gbit/s   12.19 Gbit/s
+Rendezvous      2          4.70 us        2.83 ms        11.86 Gbit/s   11.86 Gbit/s
+Eager           4         12.80 us        3.70 ms         9.06 Gbit/s   13.59 Gbit/s
+Rendezvous      4         13.21 us        3.53 ms         9.50 Gbit/s   14.26 Gbit/s
 
 Ring bus bandwidth counts traffic from both phases:
 
@@ -41,12 +41,13 @@ Ring bus bandwidth counts traffic from both phases:
 
 The protocols are close for small messages because remote addresses are shared
 during setup, so rendezvous does not need a handshake for every transfer. At
-4 MB with 4 nodes, rendezvous improves latency from 3.68 ms to 3.54 ms.
-Pipelining reduces 4-node rendezvous latency by about 17% at both 1 MB and 4 MB.
+4 MB with 4 nodes, rendezvous improves latency from 3.70 ms to 3.53 ms.
+Pipelining reduces 4-node rendezvous latency by about 6% at 1 MB and 3% at
+4 MB.
 
 Exercise 2 reached about 32.5 Gbit/s with independent one-way RDMA writes.
 All Reduce is slower because it includes dependent ring steps, CPU reduction,
-completion handling, and input/output copies. The measured 14.23 Gbit/s ring
+completion handling, and input/output copies. The measured 14.26 Gbit/s ring
 bus bandwidth is reasonable for this single-threaded collective.
 
 Usage
