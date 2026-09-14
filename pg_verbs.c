@@ -158,20 +158,24 @@ int create_rdma_resources(pg_handle_t *pg)
                 .max_recv_wr = PG_RQ_DEPTH,
                 .max_send_sge = 1,
                 .max_recv_sge = 1,
-                .max_inline_data = 0
+                .max_inline_data = PG_MAX_INLINE_REQ
             },
             .qp_type = IBV_QPT_RC,
             .sq_sig_all = 1
         };
 
         pg->qp_send = ibv_create_qp(pg->pd, &qp_attr);
+        /* The provider writes the granted amount back into cap.max_inline_data;
+         * capture it before the next create call overwrites the request. */
+        pg->max_inline = (int)qp_attr.cap.max_inline_data;
+        qp_attr.cap.max_inline_data = PG_MAX_INLINE_REQ;
         pg->qp_recv = ibv_create_qp(pg->pd, &qp_attr);
         if (!pg->qp_send || !pg->qp_recv) {
             PG_LOG_ERROR("pg_verbs", "Could not create directional queue pairs");
             return -1;
         }
-        PG_LOG_INFO("pg_verbs", "Queue pairs created: send=0x%x recv=0x%x",
-                    pg->qp_send->qp_num, pg->qp_recv->qp_num);
+        PG_LOG_INFO("pg_verbs", "Queue pairs created: send=0x%x recv=0x%x (inline=%d)",
+                    pg->qp_send->qp_num, pg->qp_recv->qp_num, pg->max_inline);
     }
 
     /* A QP must be in INIT before it can be connected to a remote QP. */
@@ -394,6 +398,9 @@ int post_eager_send(pg_handle_t *pg, const void *buffer, size_t length,
     wr.num_sge = length == 0 ? 0 : 1;
     wr.opcode = IBV_WR_SEND_WITH_IMM;
     wr.send_flags = IBV_SEND_SIGNALED;
+    if (length > 0 && length <= (size_t)pg->max_inline) {
+        wr.send_flags |= IBV_SEND_INLINE;
+    }
     wr.imm_data = immediate;
     if (ibv_post_send(pg->qp_send, &wr, &bad_wr) != 0) {
         PG_LOG_ERROR("pg_verbs", "Could not post eager send: bytes=%zu imm=0x%x",
@@ -428,6 +435,9 @@ int post_rendezvous_write(pg_handle_t *pg, const void *buffer, size_t length,
     wr.num_sge = length == 0 ? 0 : 1;
     wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
     wr.send_flags = IBV_SEND_SIGNALED;
+    if (length > 0 && length <= (size_t)pg->max_inline) {
+        wr.send_flags |= IBV_SEND_INLINE;
+    }
     wr.imm_data = immediate;
     wr.wr.rdma.remote_addr = pg->next_peer.buffer_addr + remote_offset;
     wr.wr.rdma.rkey = pg->next_peer.rkey;

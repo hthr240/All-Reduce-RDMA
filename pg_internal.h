@@ -53,6 +53,7 @@ typedef struct pg_handle {
     int ib_port;
     int gid_index;
     int bootstrap_base_port;
+    int max_inline;
 
     pg_metadata_t previous_peer;
     pg_metadata_t next_peer;
@@ -68,9 +69,10 @@ typedef struct pg_handle {
 #define PG_EAGER_SLOTS 16
 #define PG_EAGER_THRESHOLD (16u << 10)
 #define PG_RDVZ_SEGMENT_SIZE (128u << 10)
-#define PG_CQ_CAPACITY 128
-#define PG_QP_DEPTH 8
-#define PG_RQ_DEPTH 64
+#define PG_CQ_CAPACITY 256
+#define PG_QP_DEPTH 64
+#define PG_RQ_DEPTH 160
+#define PG_MAX_INLINE_REQ 512
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
 #define PG_BOOTSTRAP_RETRIES 600
