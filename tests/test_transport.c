@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Phase 4 test:
+ * Transport test:
  *  Verify the directional RDMA transport layout and invalid token handling.
  *  The complete QP connection and token test require two live RDMA ranks and
  *  are exercised with the executable's -token action on course nodes.
@@ -33,7 +33,7 @@ static int test_directional_resources(void)
 
     devices = ibv_get_device_list(&device_count);
     if (!devices || device_count == 0) {
-        fprintf(stderr, "SKIP: no RDMA device available for Phase 4 test\n");
+        fprintf(stderr, "SKIP: no RDMA device available for transport test\n");
         if (devices) {
             ibv_free_device_list(devices);
         }
@@ -41,7 +41,7 @@ static int test_directional_resources(void)
     }
     ibv_free_device_list(devices);
 
-    if (connect_process_group("phase4-test", &handle) != 0) {
+    if (connect_process_group("transport-test", &handle) != 0) {
         fprintf(stderr, "connect_process_group failed with an RDMA device\n");
         return -1;
     }
@@ -66,6 +66,6 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    printf("Phase 4 transport tests passed\n");
+    printf("Transport tests passed\n");
     return EXIT_SUCCESS;
 }

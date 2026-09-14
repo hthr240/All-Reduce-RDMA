@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
-/* Phase 5: reference-compatible reduction and uneven chunk geometry. */
+/* Reduction test: reference-compatible reduction and uneven chunk geometry. */
 #include "../pg_internal.h"
 
 #include <math.h>
@@ -111,9 +111,9 @@ int main(void)
     if (test_chunking() != 0 || test_int32_reduction() != 0 ||
         test_double_reduction() != 0 || test_validation() != 0 ||
         test_ring_schedule() != 0) {
-        fprintf(stderr, "Phase 5 reduction tests failed\n");
+        fprintf(stderr, "Reduction tests failed\n");
         return EXIT_FAILURE;
     }
-    printf("Phase 5 reduction tests passed\n");
+    printf("Reduction tests passed\n");
     return EXIT_SUCCESS;
 }

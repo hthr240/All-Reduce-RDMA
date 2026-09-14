@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Phase 1 test:
+ * Setup test:
  *  Verify the public handle API and the local RDMA Verbs initialization.
  *
  * This test uses the private header to inspect local resource state. The
@@ -57,17 +57,18 @@ static int test_local_verbs_setup(void)
     ibv_free_device_list(devices);
 
     /* This exercises the complete local setup path on an RDMA-capable host. */
-    rc = connect_process_group("phase1-test", &handle);
+    rc = connect_process_group("local-test", &handle);
     if (rc != 0) {
         fprintf(stderr, "connect_process_group failed with an RDMA device\n");
         return -1;
     }
 
-    /* Every local resource must exist and the QP must be ready for Phase 2. */
+    /* Every local resource must exist and the QP must be ready for peering. */
     pg = (pg_handle_t *)handle;
     if (!pg->context || !pg->pd || !pg->send_cq || !pg->recv_cq ||
         !pg->qp_send || !pg->qp_recv || !pg->mr ||
-        !pg->buf || pg->buf_size != PG_BUFFER_SIZE || pg->ib_port <= 0 ||
+        !pg->buf || pg->buf_size != PG_REGISTERED_BUFFER_SIZE(pg->size) ||
+        pg->ib_port <= 0 ||
         pg->qp_send->state != IBV_QPS_INIT ||
         pg->qp_recv->state != IBV_QPS_INIT || !pg->is_connected) {
         fprintf(stderr, "local Verbs handle is incomplete or not in INIT\n");
@@ -86,6 +87,6 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    printf("Phase 1 tests passed\n");
+    printf("Setup tests passed\n");
     return EXIT_SUCCESS;
 }

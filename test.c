@@ -432,6 +432,10 @@ static int run_benchmark(void *handle, int rank, DATATYPE datatype,
         }
     }
 
+    if (rank == 0) {
+        printf("# bytes\tlatency_usec\tbandwidth_MBps\n");
+        fflush(stdout);
+    }
     for (bytes = 8; bytes <= BENCHMARK_MAX_BYTES; bytes <<= 1) {
         int count = (int)(bytes / element_size);
         int iterations = iterations_override > 0 ? iterations_override :
@@ -456,7 +460,9 @@ static int run_benchmark(void *handle, int rank, DATATYPE datatype,
         }
         latency_us = (monotonic_seconds() - started) * 1e6 / iterations;
         if (rank == 0) {
-            printf("%zu\t%.3f\tusec\n", bytes, latency_us);
+            /* bytes per microsecond is exactly decimal megabytes per second */
+            printf("%zu\t%.3f\t%.3f\n", bytes, latency_us,
+                   (double)bytes / latency_us);
             fflush(stdout);
         }
     }

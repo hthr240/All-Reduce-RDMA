@@ -51,6 +51,8 @@ typedef struct pg_handle {
     size_t eager_threshold;
     int pipeline_enabled;
     int ib_port;
+    int gid_index;
+    int bootstrap_base_port;
 
     pg_metadata_t previous_peer;
     pg_metadata_t next_peer;
@@ -63,17 +65,20 @@ typedef struct pg_handle {
 #define PG_EAGER_BUFFER_SIZE 4096
 #define PG_EAGER_THRESHOLD (16u << 10)
 #define PG_RDVZ_SEGMENT_SIZE (128u << 10)
-#define PG_BUFFER_SIZE (PG_WORK_BUFFER_SIZE + PG_EAGER_BUFFER_SIZE)
 #define PG_CQ_CAPACITY 16
 #define PG_QP_DEPTH 8
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
 #define PG_BOOTSTRAP_RETRIES 600
 
+/* One staging slot must hold the largest chunk of any datatype: 8-byte
+ * elements round the per-rank ceiling up past ceil(WORK/size) bytes, so the
+ * slot is the 8-byte-element ceiling scaled back to bytes. */
+#define PG_RDVZ_SLOT_SIZE(pg_size) \
+    ((size_t)8 * (((size_t)PG_WORK_BUFFER_SIZE / 8 + (size_t)(pg_size) - 1) / \
+                  (size_t)(pg_size)))
 #define PG_RDVZ_STAGING_SIZE(pg_size) \
-    ((size_t)((pg_size) - 1) * \
-     (((size_t)PG_WORK_BUFFER_SIZE + (size_t)(pg_size) - 1) / \
-      (size_t)(pg_size)))
+    ((size_t)((pg_size) - 1) * PG_RDVZ_SLOT_SIZE(pg_size))
 #define PG_REGISTERED_BUFFER_SIZE(pg_size) \
     ((size_t)PG_WORK_BUFFER_SIZE + PG_RDVZ_STAGING_SIZE(pg_size) + \
      (size_t)PG_EAGER_BUFFER_SIZE)

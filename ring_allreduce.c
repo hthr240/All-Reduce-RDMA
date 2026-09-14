@@ -111,6 +111,28 @@ static void destroy_process_group(pg_handle_t *pg)
     free(pg);
 }
 
+/* Returns 0 when unset, 1 when parsed into *out, -1 on an invalid value. */
+static int parse_env_int(const char *name, long minimum, long maximum,
+                         int *out)
+{
+    const char *text = getenv(name);
+    char *end = NULL;
+    long value;
+
+    if (!text) {
+        return 0;
+    }
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value < minimum || value > maximum) {
+        fprintf(stderr, "Invalid %s value: %s\n", name, text);
+        return -1;
+    }
+    *out = (int)value;
+    return 1;
+}
+
 int configure_transport_mode(pg_handle_t *pg)
 {
     const char *mode;
@@ -122,8 +144,15 @@ int configure_transport_mode(pg_handle_t *pg)
     }
     pg->transport_mode = PG_TRANSPORT_AUTO;
     pg->eager_threshold = PG_EAGER_THRESHOLD;
+    pg->gid_index = -1;
+    pg->bootstrap_base_port = PG_BOOTSTRAP_BASE_PORT;
     no_pipeline = getenv("PG_NOPIPE");
     pg->pipeline_enabled = !no_pipeline || strcmp(no_pipeline, "1") != 0;
+    if (parse_env_int("PG_GID_IDX", 0, 255, &pg->gid_index) < 0 ||
+        parse_env_int("PG_TCP_PORT", 1024, 65535,
+                      &pg->bootstrap_base_port) < 0) {
+        return -1;
+    }
     threshold = getenv("PG_EAGER_THRESHOLD");
     if (threshold) {
         char *end = NULL;
@@ -169,20 +198,13 @@ static int use_rendezvous_transport(const pg_handle_t *pg, int count,
 
 /*
  * connect_process_group:
- *  Initialize the local process-group handle and local RDMA resources.
+ *  Build the ring: allocate the handle, open the Verbs device, create the
+ *  registered buffer and both directional RC QPs, then run the TCP bootstrap
+ *  that exchanges QP metadata with the ring neighbours and drives the QPs to
+ *  RTS. On success the handle is fully connected and ready for collectives.
  *
- *  Current phase flow:
- *   1. Allocate the opaque handle and copy the hostname.
- *   2. Discover and open the first available Verbs device.
- *   3. Find an active physical port.
- *   4. Allocate a protection domain and registered communication buffer.
- *   5. Create a completion queue and a reliable-connected queue pair.
- *   6. Move the new QP from RESET to INIT.
- *
- *  This function does not contact another process yet. The QP remains in INIT
- *  until a later phase exchanges remote metadata and moves it through RTR and
- *  RTS. Therefore is_connected currently means that local setup succeeded,
- *  not that a remote rank is connected.
+ *  A bare hostname (no ':' group spec) yields a local single-process handle
+ *  with no fabric connection, which the unit tests rely on.
  *
  *  Parameters:
  *   - servername: the host associated with this rank in the group
@@ -268,14 +290,10 @@ int connect_process_group(char *servername, void **pg_handle)
 
 /*
  * pg_all_reduce:
- *  Public collective API for the all-reduce operation.
- *
- *  This function is the main collective entry point. In the final design it will:
- *  - validate the datatype and operation
- *  - divide the data into ring chunks
- *  - run Reduce Scatter
- *  - run All Gather
- *  - write the final reduced result into recvbuf
+ *  Element-wise reduction of count elements across all ranks; every rank
+ *  ends with the full reduced vector in recvbuf. Runs ring Reduce Scatter
+ *  followed by ring All Gather over the transport picked by PG_MODE and the
+ *  eager threshold. sendbuf == recvbuf (in place) is allowed.
  *
  *  Parameters:
  *   - sendbuf: input data for the local rank
@@ -436,7 +454,7 @@ int pg_all_gather(void *sendbuf, void *recvbuf, int count,
         (size_t)count * element_size > PG_WORK_BUFFER_SIZE) {
         return -1;
     }
-    memcpy((unsigned char *)pg->buf +
+    memcpy((unsigned char *)pg->buf + pg->work_offset +
                (size_t)owned_offset * element_size,
            sendbuf, (size_t)owned_count * element_size);
     if (use_rendezvous_transport(pg, count, element_size)) {
@@ -445,7 +463,7 @@ int pg_all_gather(void *sendbuf, void *recvbuf, int count,
     return pg_run_eager_all_gather(pg, recvbuf, count, datatype);
 }
 
-/* Phase 4 connectivity smoke test; collective data movement comes later. */
+/* Connectivity smoke test: circulate a one-byte token around the ring. */
 int pg_ring_token(void *pg_handle, int laps)
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
@@ -464,10 +482,9 @@ int pg_ring_token(void *pg_handle, int laps)
 
 /*
  * pg_close:
- *  Release the process-group handle and any associated local resources.
- *
- *  In the final implementation this function must free all registered memory,
- *  destroy queue pairs, and clean up the verbs objects in reverse dependency order.
+ *  Barrier with the ring neighbours so no rank tears down while a peer is
+ *  still mid-collective, then release every socket and Verbs resource in
+ *  reverse dependency order.
  */
 int pg_close(void *pg_handle)
 {
@@ -564,15 +581,9 @@ static char *build_process_group_spec(int rank, char **hosts, int host_count)
 
 /*
  * main:
- *  Program entry point.
- *
- *  Responsibilities:
- *   - parse the command line
- *   - determine the rank and process-group membership
- *   - initialize the process-group handle
- *   - exercise the collective interface in the current skeleton build
- *
- *  This is the orchestration layer that connects user input to the process-group state.
+ *  Standalone demo driver: parse the command line, connect the group, then
+ *  run the token smoke test or a small all-reduce. The course harness uses
+ *  test.c instead (built with -DPG_LIBRARY_ONLY, which compiles this out).
  */
 int main(int argc, char **argv)
 {

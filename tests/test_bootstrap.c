@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Phase 3 test:
+ * Bootstrap test:
  *  Verify bootstrap metadata serialization and exact-length TCP-style I/O.
  *
  * A Unix socket pair provides two connected byte streams locally. It tests the
@@ -120,6 +120,6 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    printf("Phase 3 bootstrap helper tests passed\n");
+    printf("Bootstrap helper tests passed\n");
     return EXIT_SUCCESS;
 }

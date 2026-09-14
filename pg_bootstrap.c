@@ -264,8 +264,13 @@ int metadata_from_qp(const pg_handle_t *pg, struct ibv_qp *qp,
         return -1;
     }
     memset(metadata, 0, sizeof(*metadata));
-    if (ibv_query_port(pg->context, (uint8_t)pg->ib_port, &port_attr) != 0 ||
-        ibv_query_gid(pg->context, (uint8_t)pg->ib_port, 0, &metadata->gid) != 0) {
+    if (ibv_query_port(pg->context, (uint8_t)pg->ib_port, &port_attr) != 0) {
+        return -1;
+    }
+    /* A zeroed GID keeps LID routing; PG_GID_IDX opts into GRH (RoCE). */
+    if (pg->gid_index >= 0 &&
+        ibv_query_gid(pg->context, (uint8_t)pg->ib_port,
+                      pg->gid_index, &metadata->gid) != 0) {
         return -1;
     }
 
@@ -457,7 +462,7 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     uint32_t psn_previous;
 
     if (!pg || !host_list || host_count != pg->size || pg->size <= 0 ||
-        PG_BOOTSTRAP_BASE_PORT + pg->size >= 65536) {
+        pg->bootstrap_base_port + pg->size >= 65536) {
         return -1;
     }
     psn_next = (uint32_t)(rand() & 0x00ffffffu);
@@ -466,8 +471,8 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
         return -1;
     }
 
-    listen_port = PG_BOOTSTRAP_BASE_PORT + pg->rank;
-    next_port = PG_BOOTSTRAP_BASE_PORT + pg->next_rank;
+    listen_port = pg->bootstrap_base_port + pg->rank;
+    next_port = pg->bootstrap_base_port + pg->next_rank;
     PG_LOG_INFO("pg_bootstrap",
                 "Rank %d preparing listener on port %d; connecting to rank %d at %s:%d",
                 pg->rank, listen_port, pg->next_rank,

@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
-/* Phase 6: bounded eager collective and public API checks. */
+/* Eager transport test: bounded eager collective and public API checks. */
 #include "../pg_internal.h"
 
 #include <stdio.h>
@@ -99,17 +99,18 @@ static int test_single_rank_all_gather(void)
 static int test_eager_work_buffer_limit(void)
 {
     pg_handle_t pg = {0};
-    unsigned char workspace[PG_BUFFER_SIZE];
-    int input[8193] = {0};
-    int output[8193] = {0};
+    /* Never touched: the size validation fires before any buffer access. */
+    static unsigned char workspace[16];
+    int too_many = (int)(PG_WORK_BUFFER_SIZE / sizeof(int32_t)) + 1;
+    int dummy = 0;
 
     pg.rank = 0;
     pg.size = 2;
     pg.is_connected = 1;
     pg.buf = workspace;
-    if (pg_run_eager_reduce_scatter(&pg, input, output, 8193,
+    if (pg_run_eager_reduce_scatter(&pg, &dummy, &dummy, too_many,
                                     PG_INT32, PG_SUM) != -1 ||
-        pg_run_eager_all_gather(&pg, output, 8193, PG_INT32) != -1) {
+        pg_run_eager_all_gather(&pg, &dummy, too_many, PG_INT32) != -1) {
         fprintf(stderr, "eager transfer exceeded the work buffer\n");
         return -1;
     }
@@ -141,6 +142,6 @@ int main(void)
         test_eager_sequence_progression() != 0) {
         return EXIT_FAILURE;
     }
-    printf("Phase 6 eager transport tests passed\n");
+    printf("Eager transport tests passed\n");
     return EXIT_SUCCESS;
 }

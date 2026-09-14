@@ -55,8 +55,31 @@ int create_rdma_resources(pg_handle_t *pg)
     }
     PG_LOG_INFO("pg_verbs", "Found %d RDMA device(s)", device_count);
 
-    /* Device selection is intentionally simple for this first milestone. */
-    device = device_list[0];
+    /* PG_IB_DEV picks a device by name on multi-HCA hosts. */
+    {
+        const char *wanted = getenv("PG_IB_DEV");
+
+        device = NULL;
+        if (wanted && *wanted) {
+            int index;
+
+            for (index = 0; index < device_count; ++index) {
+                if (strcmp(ibv_get_device_name(device_list[index]),
+                           wanted) == 0) {
+                    device = device_list[index];
+                    break;
+                }
+            }
+            if (!device) {
+                PG_LOG_ERROR("pg_verbs", "Requested device %s not found",
+                             wanted);
+                ibv_free_device_list(device_list);
+                return -1;
+            }
+        } else {
+            device = device_list[0];
+        }
+    }
     PG_LOG_DEBUG("pg_verbs", "Selected device: %s", ibv_get_device_name(device));
 
     /* The context is the process's active handle for using the device. */
@@ -90,8 +113,7 @@ int create_rdma_resources(pg_handle_t *pg)
 
     pg->work_offset = 0;
     pg->staging_offset = PG_WORK_BUFFER_SIZE;
-    pg->staging_slot_size = ((size_t)PG_WORK_BUFFER_SIZE +
-                             (size_t)pg->size - 1) / (size_t)pg->size;
+    pg->staging_slot_size = PG_RDVZ_SLOT_SIZE(pg->size);
     pg->eager_offset = pg->staging_offset + PG_RDVZ_STAGING_SIZE(pg->size);
     buffer_size = PG_REGISTERED_BUFFER_SIZE(pg->size);
 
@@ -207,6 +229,8 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
     attr.ah_attr.port_num = (uint8_t)pg->ib_port;
     if (attr.ah_attr.is_global) {
         attr.ah_attr.grh.dgid = remote->gid;
+        attr.ah_attr.grh.sgid_index =
+            (uint8_t)(pg->gid_index >= 0 ? pg->gid_index : 0);
         attr.ah_attr.grh.hop_limit = 1;
     }
     flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |

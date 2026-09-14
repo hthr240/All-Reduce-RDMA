@@ -1,12 +1,10 @@
-# Keep the repository limited to C sources, headers, the Makefile, and the report.
+# Keep the repository limited to C sources, headers, and the Makefile;
+# benchmark results and the report join here once written.
 *
 !.gitignore
 !*.c
 !*.h
 !Makefile
-!report.txt
-!REFACTORING.md
-!BENCHMARK_REPORT.md
 !results-*.tsv
 !tests/
 tests/*

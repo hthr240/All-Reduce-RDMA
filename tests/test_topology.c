@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /*
- * Phase 2 test:
+ * Topology test:
  *  Verify the local logical-ring topology calculation without requiring
  *  network peers or an RDMA device.
  */
@@ -107,6 +107,6 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    printf("Phase 2 topology tests passed\n");
+    printf("Topology tests passed\n");
     return EXIT_SUCCESS;
 }
