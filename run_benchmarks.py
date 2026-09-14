@@ -137,7 +137,7 @@ def main():
     parser.add_argument("--iters", type=int, default=0,
                         help="override iterations per size (0 = banded default)")
     parser.add_argument("--sanity", action="store_true",
-                        help="run the 2-node correctness suite before benching")
+                        help="run correctness suites for every selected group size")
     parser.add_argument("--sweep-thresholds", nargs="+", type=int, default=[],
                         metavar="BYTES",
                         help="extra 2-node auto runs with -threshold values")
@@ -161,11 +161,12 @@ def main():
     iters = ["-iters", str(args.iters)] if args.iters > 0 else []
 
     if args.sanity:
-        print("== sanity: 2-node -suite (auto, then forced eager/rdvz) ==")
-        for extra in ([], ["-mode", "eager"], ["-mode", "rdvz"]):
-            if not run_group(args.hosts[:2], ["-suite", *extra]):
-                sys.exit("correctness suite failed; not benchmarking")
-        print("  suite passed")
+        print("== sanity: -suite (auto, then forced eager/rdvz) ==")
+        for n in sorted(args.nodes):
+            for extra in ([], ["-mode", "eager"], ["-mode", "rdvz"]):
+                if not run_group(args.hosts[:n], ["-suite", *extra]):
+                    sys.exit("%d-node correctness suite failed; not benchmarking" % n)
+            print("  %d-node suites passed" % n)
 
     jobs = []
     for n in sorted(args.nodes):
