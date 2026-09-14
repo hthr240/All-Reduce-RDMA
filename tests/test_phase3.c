@@ -7,12 +7,11 @@
  * A Unix socket pair provides two connected byte streams locally. It tests the
  * protocol helpers without requiring two course nodes or an RDMA device.
  */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 

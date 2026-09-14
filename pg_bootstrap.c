@@ -11,9 +11,136 @@
 #include <unistd.h>
 #include <stdint.h>
 
-#include "pg_common.h"
-#include "pg_bootstrap.h"
-#include "pg_verbs.h"
+#include "pg_internal.h"
+
+int validate_host_list(char **host_list, int host_count)
+{
+    int i;
+    int j;
+
+    if (!host_list || host_count <= 0) {
+        fprintf(stderr, "Process-group host list is empty\n");
+        return -1;
+    }
+
+    for (i = 0; i < host_count; ++i) {
+        if (!host_list[i] || host_list[i][0] == '\0') {
+            fprintf(stderr, "Process-group host list contains an empty host\n");
+            return -1;
+        }
+        for (j = i + 1; j < host_count; ++j) {
+            if (strcmp(host_list[i], host_list[j]) == 0) {
+                fprintf(stderr, "Process-group host list contains a duplicate host\n");
+                return -1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+void free_process_group_hosts(char **host_list, int host_count)
+{
+    int index;
+
+    if (!host_list) {
+        return;
+    }
+    for (index = 0; index < host_count; ++index) {
+        free(host_list[index]);
+    }
+    free(host_list);
+}
+
+int parse_process_group_spec(const char *spec, int *rank,
+                             char ***host_list, int *host_count)
+{
+    char *copy = NULL;
+    char *separator;
+    char *hosts_part;
+    char *token;
+    char *saveptr = NULL;
+    char *end = NULL;
+    char **hosts = NULL;
+    long external_rank;
+    int count = 0;
+    int capacity = 0;
+
+    if (!spec || !rank || !host_list || !host_count) {
+        return -1;
+    }
+    *host_list = NULL;
+    *host_count = 0;
+
+    copy = strdup(spec);
+    if (!copy) {
+        return -1;
+    }
+    separator = strchr(copy, ':');
+    if (!separator || separator == copy || separator[1] == '\0') {
+        goto fail;
+    }
+    hosts_part = separator + 1;
+    if (hosts_part[0] == ',' || hosts_part[strlen(hosts_part) - 1] == ',' ||
+        strstr(hosts_part, ",,") != NULL) {
+        goto fail;
+    }
+    *separator = '\0';
+    errno = 0;
+    external_rank = strtol(copy, &end, 10);
+    if (errno != 0 || *end != '\0' || external_rank < 1 ||
+        external_rank > 65536) {
+        goto fail;
+    }
+
+    for (token = strtok_r(hosts_part, ",", &saveptr); token;
+         token = strtok_r(NULL, ",", &saveptr)) {
+        char **grown;
+
+        if (count == capacity) {
+            capacity = capacity == 0 ? 4 : capacity * 2;
+            grown = realloc(hosts, (size_t)capacity * sizeof(*hosts));
+            if (!grown) {
+                goto fail;
+            }
+            hosts = grown;
+        }
+        hosts[count] = strdup(token);
+        if (!hosts[count]) {
+            goto fail;
+        }
+        ++count;
+    }
+
+    if (count < 2 || external_rank > count ||
+        validate_host_list(hosts, count) != 0) {
+        goto fail;
+    }
+    *rank = (int)external_rank - 1;
+    *host_list = hosts;
+    *host_count = count;
+    free(copy);
+    return 0;
+
+fail:
+    free(copy);
+    free_process_group_hosts(hosts, count);
+    return -1;
+}
+
+int configure_process_group_topology(pg_handle_t *pg, int rank, int size)
+{
+    if (!pg || rank < 0 || size <= 0 || rank >= size) {
+        fprintf(stderr, "Invalid process-group topology\n");
+        return -1;
+    }
+
+    pg->rank = rank;
+    pg->size = size;
+    pg->previous_rank = (rank + size - 1) % size;
+    pg->next_rank = (rank + 1) % size;
+    return 0;
+}
 
 static uint64_t host_to_network_u64(uint64_t value)
 {
@@ -126,12 +253,6 @@ int read_full(int fd, void *buffer, size_t length)
     }
 
     return 0;
-}
-
-int metadata_from_process_group(const pg_handle_t *pg, pg_metadata_t *metadata)
-{
-    return metadata_from_qp(pg, pg ? pg->qp_send : NULL,
-                            (uint32_t)(rand() & 0x00ffffff), metadata);
 }
 
 int metadata_from_qp(const pg_handle_t *pg, struct ibv_qp *qp,
@@ -347,28 +468,35 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
 
     listen_port = PG_BOOTSTRAP_BASE_PORT + pg->rank;
     next_port = PG_BOOTSTRAP_BASE_PORT + pg->next_rank;
-    PG_TRACE(pg->rank, "Preparing listener on port %d; connecting to rank %d at %s:%d",
-             listen_port, pg->next_rank, host_list[pg->next_rank], next_port);
+    PG_LOG_INFO("pg_bootstrap",
+                "Rank %d preparing listener on port %d; connecting to rank %d at %s:%d",
+                pg->rank, listen_port, pg->next_rank,
+                host_list[pg->next_rank], next_port);
     listener_fd = create_bootstrap_listener(listen_port);
     if (listener_fd < 0) {
         return -1;
     }
-    PG_TRACE(pg->rank, "Listening on port %d", listen_port);
+    PG_LOG_DEBUG("pg_bootstrap", "Rank %d listening on port %d",
+                 pg->rank, listen_port);
 
     outgoing_fd = connect_bootstrap_peer(host_list[pg->next_rank], next_port);
     if (outgoing_fd < 0) {
         goto cleanup;
     }
-    PG_TRACE(pg->rank, "Outgoing connection established; waiting for previous rank on port %d",
-             listen_port);
+    PG_LOG_DEBUG("pg_bootstrap",
+                 "Rank %d connected to next rank; waiting for previous rank on port %d",
+                 pg->rank, listen_port);
     incoming_fd = accept(listener_fd, NULL, NULL);
     if (incoming_fd < 0) {
-        PG_TRACE(pg->rank, "accept failed: %s", strerror(errno));
+        PG_LOG_ERROR("pg_bootstrap", "Rank %d accept failed: %s",
+                 pg->rank, strerror(errno));
         goto cleanup;
     }
-    PG_TRACE(pg->rank, "Incoming connection accepted");
+    PG_LOG_DEBUG("pg_bootstrap", "Rank %d accepted previous-rank connection",
+                 pg->rank);
 
-    PG_TRACE(pg->rank, "Sending metadata to next rank %d", pg->next_rank);
+    PG_LOG_DEBUG("pg_bootstrap", "Rank %d sending metadata to rank %d",
+                 pg->rank, pg->next_rank);
     if (send_peer_metadata(outgoing_fd, &local_metadata) != 0 ||
         receive_peer_metadata(incoming_fd, &remote_metadata) != 0 ||
         metadata_from_qp(pg, pg->qp_recv, psn_previous, &local_metadata) != 0 ||
@@ -378,15 +506,20 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
                                (uint32_t)pg->size) != 0 ||
         validate_peer_metadata(&remote_metadata, (uint32_t)pg->previous_rank,
                                (uint32_t)pg->size) != 0) {
-        PG_TRACE(pg->rank, "Peer metadata exchange or validation failed");
+        PG_LOG_ERROR("pg_bootstrap",
+                 "Rank %d peer metadata exchange or validation failed",
+                 pg->rank);
         goto cleanup;
     }
-    PG_TRACE(pg->rank, "Peer metadata validated for ranks %d and %d",
-             pg->previous_rank, pg->next_rank);
+    PG_LOG_DEBUG("pg_bootstrap",
+                 "Rank %d validated peer metadata for ranks %d and %d",
+                 pg->rank, pg->previous_rank, pg->next_rank);
     pg->previous_peer = remote_metadata;
     if (connect_rdma_qp(pg, pg->qp_send, psn_next, &pg->next_peer) != 0 ||
         connect_rdma_qp(pg, pg->qp_recv, psn_previous, &pg->previous_peer) != 0) {
-        PG_TRACE(pg->rank, "Could not move directional QPs to RTS");
+        PG_LOG_ERROR("pg_bootstrap",
+                 "Rank %d could not move directional QPs to RTS",
+                 pg->rank);
         goto cleanup;
     }
     pg->sock_next = outgoing_fd;
@@ -394,11 +527,14 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
     outgoing_fd = -1;
     incoming_fd = -1;
     if (bootstrap_ring_barrier(pg) != 0) {
-        PG_TRACE(pg->rank, "Ring setup barrier failed");
+        PG_LOG_ERROR("pg_bootstrap", "Rank %d ring setup barrier failed",
+                 pg->rank);
         goto cleanup;
     }
     pg->is_connected = 1;
-    PG_TRACE(pg->rank, "Ring setup barrier completed; transport is ready");
+    PG_LOG_INFO("pg_bootstrap",
+                "Rank %d ring setup completed; transport is ready",
+                pg->rank);
     rc = 0;
 
 cleanup:

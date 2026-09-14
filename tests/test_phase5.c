@@ -1,16 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Phase 5: reference-compatible reduction and uneven chunk geometry. */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#include "../pg_reduction.h"
 
 static int test_chunking(void)
 {

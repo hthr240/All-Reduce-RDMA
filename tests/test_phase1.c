@@ -4,17 +4,14 @@
  * Phase 1 test:
  *  Verify the public handle API and the local RDMA Verbs initialization.
  *
- * This test includes the implementation directly so it can inspect the
- * internal pg_handle_t fields. That is intentional for this phase only; the
+ * This test uses the private header to inspect local resource state. The
  * production API remains opaque to normal callers.
  *
  * The Verbs portion is skipped when no RDMA device is visible. This lets the
  * same test run on development machines without RDMA hardware while still
  * exercising the full initialization on a course node.
  */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,9 +65,11 @@ static int test_local_verbs_setup(void)
 
     /* Every local resource must exist and the QP must be ready for Phase 2. */
     pg = (pg_handle_t *)handle;
-    if (!pg->context || !pg->pd || !pg->cq || !pg->qp || !pg->mr ||
+    if (!pg->context || !pg->pd || !pg->send_cq || !pg->recv_cq ||
+        !pg->qp_send || !pg->qp_recv || !pg->mr ||
         !pg->buf || pg->buf_size != PG_BUFFER_SIZE || pg->ib_port <= 0 ||
-        pg->qp->state != IBV_QPS_INIT || !pg->is_connected) {
+        pg->qp_send->state != IBV_QPS_INIT ||
+        pg->qp_recv->state != IBV_QPS_INIT || !pg->is_connected) {
         fprintf(stderr, "local Verbs handle is incomplete or not in INIT\n");
         pg_close(handle);
         return -1;
