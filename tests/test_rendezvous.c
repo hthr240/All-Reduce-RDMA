@@ -39,7 +39,8 @@ static int test_staging_geometry(void)
         size_t largest_double_chunk =
             (size_t)pg_chunk_nelem(double_count, size, 0) * sizeof(double);
 
-        if (largest_int_chunk > slot || largest_double_chunk > slot) {
+        if (slot % PG_STAGING_ALIGNMENT != 0 ||
+            largest_int_chunk > slot || largest_double_chunk > slot) {
             fprintf(stderr,
                     "staging slot too small for %d ranks: slot=%zu int=%zu double=%zu\n",
                     size, slot, largest_int_chunk, largest_double_chunk);

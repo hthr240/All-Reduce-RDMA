@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <infiniband/verbs.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "pg_internal.h"
 
@@ -37,6 +38,7 @@ int create_rdma_resources(pg_handle_t *pg)
     struct ibv_device *device;
     int device_count = 0;
     size_t buffer_size;
+    long page_size;
 
     if (!pg) {
         PG_LOG_ERROR("pg_verbs", "Invalid process-group handle");
@@ -118,12 +120,17 @@ int create_rdma_resources(pg_handle_t *pg)
     buffer_size = PG_REGISTERED_BUFFER_SIZE(pg->size);
 
     PG_LOG_DEBUG("pg_verbs", "Allocating %zu byte registered buffer", buffer_size);
-    pg->buf = calloc(1, buffer_size);
+    page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0 ||
+        posix_memalign(&pg->buf, (size_t)page_size, buffer_size) != 0) {
+        pg->buf = NULL;
+    }
     pg->buf_size = buffer_size;
     if (!pg->buf) {
         PG_LOG_ERROR("pg_verbs", "Could not allocate process-group buffer");
         return -1;
     }
+    memset(pg->buf, 0, buffer_size);
     PG_LOG_DEBUG("pg_verbs", "Buffer allocated at %p", pg->buf);
 
     /* Registration makes the buffer accessible to the RDMA hardware. */
@@ -200,6 +207,17 @@ int create_rdma_resources(pg_handle_t *pg)
         PG_LOG_INFO("pg_verbs", "Directional QPs moved to INIT successfully");
     }
 
+    {
+        int slot;
+
+        for (slot = 0; slot < PG_RQ_DEPTH; ++slot) {
+            if (post_eager_receive(pg, PG_EAGER_BUFFER_SIZE,
+                                   (uint64_t)slot) != 0) {
+                return -1;
+            }
+        }
+    }
+
     PG_LOG_INFO("pg_verbs", "All RDMA resources created successfully");
     return 0;
 }
@@ -221,12 +239,12 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
 
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = port_attr.active_mtu;
+    attr.path_mtu = port_attr.active_mtu < IBV_MTU_2048 ?
+                    port_attr.active_mtu : IBV_MTU_2048;
     attr.dest_qp_num = remote->qpn;
     attr.rq_psn = remote->psn;
     attr.max_dest_rd_atomic = 1;
-    /* 0.01 ms backoff; with infinite rnr_retry a boundary race costs ~10 us. */
-    attr.min_rnr_timer = 1;
+    attr.min_rnr_timer = 12;
     attr.ah_attr.is_global = remote->gid.global.interface_id != 0;
     attr.ah_attr.dlid = remote->lid;
     attr.ah_attr.sl = 0;
@@ -280,18 +298,13 @@ int ring_token(pg_handle_t *pg, int laps)
             .length = 1,
             .lkey = pg->mr->lkey
         };
-        struct ibv_recv_wr recv_wr = {
-            .wr_id = (uint64_t)lap,
-            .sg_list = &sge,
-            .num_sge = 1
-        };
-        struct ibv_recv_wr *bad_recv = NULL;
         struct ibv_send_wr send_wr = {
             .wr_id = (uint64_t)lap,
             .sg_list = &sge,
             .num_sge = 1,
-            .opcode = IBV_WR_SEND,
-            .send_flags = IBV_SEND_SIGNALED
+            .opcode = IBV_WR_SEND_WITH_IMM,
+            .send_flags = IBV_SEND_SIGNALED,
+            .imm_data = PG_EAGER_IMM(0xab, 0, lap)
         };
         struct ibv_send_wr *bad_send = NULL;
         int received = 0;
@@ -300,8 +313,8 @@ int ring_token(pg_handle_t *pg, int laps)
 
         *(unsigned char *)pg->buf = token;
 
-        if (ibv_post_recv(pg->qp_recv, &recv_wr, &bad_recv) != 0) {
-            return -1;
+        if (pg->max_inline >= 1) {
+            send_wr.send_flags |= IBV_SEND_INLINE;
         }
         if (pg->rank == 0) {
             if (ibv_post_send(pg->qp_send, &send_wr, &bad_send) != 0) {
@@ -316,12 +329,24 @@ int ring_token(pg_handle_t *pg, int laps)
                 return -1;
             }
             if (count == 1) {
+                size_t slot = (size_t)wc[0].wr_id;
+                const unsigned char *received_token;
+
                 if (wc[0].status != IBV_WC_SUCCESS ||
-                    wc[0].byte_len != 1 || pg->buf == NULL) {
+                    wc[0].opcode != IBV_WC_RECV || wc[0].byte_len != 1 ||
+                    wc[0].imm_data != PG_EAGER_IMM(0xab, 0, lap) ||
+                    slot >= PG_EAGER_SLOTS) {
                     return -1;
                 }
-                if (*(unsigned char *)pg->buf != token) {
+                received_token = (const unsigned char *)pg->buf +
+                                 pg->eager_offset +
+                                 slot * PG_EAGER_BUFFER_SIZE;
+                if (*received_token != token) {
                     PG_LOG_ERROR("pg_verbs", "Ring token payload mismatch on lap %d", lap);
+                    return -1;
+                }
+                if (post_eager_receive(pg, PG_EAGER_BUFFER_SIZE,
+                                       wc[0].wr_id) != 0) {
                     return -1;
                 }
                 received = 1;
@@ -354,15 +379,13 @@ int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id)
     struct ibv_recv_wr *bad_wr = NULL;
 
     if (!pg || !pg->qp_recv || !pg->mr || !pg->buf ||
-        length > PG_EAGER_BUFFER_SIZE) {
+        length > PG_EAGER_BUFFER_SIZE || work_id >= PG_EAGER_SLOTS) {
         return -1;
     }
 
     memset(&sge, 0, sizeof(sge));
-    /* FIFO RQ consumption maps the k-th posted receive to bounce slot k%N. */
     sge.addr = (uintptr_t)((unsigned char *)pg->buf + pg->eager_offset +
-                           (size_t)(work_id % PG_EAGER_SLOTS) *
-                               PG_EAGER_BUFFER_SIZE);
+                           (size_t)work_id * PG_EAGER_BUFFER_SIZE);
     sge.length = PG_EAGER_BUFFER_SIZE;
     sge.lkey = pg->mr->lkey;
     memset(&wr, 0, sizeof(wr));
@@ -452,17 +475,23 @@ int post_rendezvous_write(pg_handle_t *pg, const void *buffer, size_t length,
 
 int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc)
 {
+    return poll_completions(pg, receive, wc, 1);
+}
+
+int poll_completions(pg_handle_t *pg, int receive, struct ibv_wc *wc,
+                     int max_completions)
+{
     struct ibv_cq *cq;
     int count;
 
-    if (!pg || !wc) {
+    if (!pg || !wc || max_completions <= 0) {
         return -1;
     }
     cq = receive ? pg->recv_cq : pg->send_cq;
     if (!cq) {
         return -1;
     }
-    count = ibv_poll_cq(cq, 1, wc);
+    count = ibv_poll_cq(cq, max_completions, wc);
     return count < 0 ? -1 : count;
 }
 

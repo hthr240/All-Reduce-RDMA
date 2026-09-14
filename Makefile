@@ -7,7 +7,7 @@
 #   make clean        remove build artifacts
 
 CC       ?= gcc
-CFLAGS   ?= -O2 -Wall -Wextra -std=c11
+CFLAGS   ?= -O3 -Wall -Wextra -std=c11
 CPPFLAGS += $(shell pkg-config --cflags libibverbs 2>/dev/null)
 LDLIBS   += $(shell pkg-config --libs libibverbs 2>/dev/null || echo -libverbs) -lm
 

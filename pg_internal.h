@@ -63,16 +63,16 @@ typedef struct pg_handle {
 } pg_handle_t;
 
 #define PG_WORK_BUFFER_SIZE (4u << 20)
-/* Receive-side bounce ring: slots x segment; 16 posted slots always cover
- * the sender's depth of 8, so RNR NAKs only happen at collective edges. */
 #define PG_EAGER_BUFFER_SIZE 8192
-#define PG_EAGER_SLOTS 16
 #define PG_EAGER_THRESHOLD (16u << 10)
 #define PG_RDVZ_SEGMENT_SIZE (128u << 10)
 #define PG_CQ_CAPACITY 256
 #define PG_QP_DEPTH 64
 #define PG_RQ_DEPTH 160
+#define PG_EAGER_SLOTS PG_RQ_DEPTH
+#define PG_WC_BATCH 16
 #define PG_MAX_INLINE_REQ 512
+#define PG_STAGING_ALIGNMENT 64
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
 #define PG_BOOTSTRAP_RETRIES 600
@@ -80,9 +80,14 @@ typedef struct pg_handle {
 /* One staging slot must hold the largest chunk of any datatype: 8-byte
  * elements round the per-rank ceiling up past ceil(WORK/size) bytes, so the
  * slot is the 8-byte-element ceiling scaled back to bytes. */
+#define PG_ALIGN_UP(value, alignment) \
+        (((size_t)(value) + (size_t)(alignment) - 1) / \
+         (size_t)(alignment) * (size_t)(alignment))
 #define PG_RDVZ_SLOT_SIZE(pg_size) \
-    ((size_t)8 * (((size_t)PG_WORK_BUFFER_SIZE / 8 + (size_t)(pg_size) - 1) / \
-                  (size_t)(pg_size)))
+        PG_ALIGN_UP((size_t)8 * \
+                                (((size_t)PG_WORK_BUFFER_SIZE / 8 + \
+                                    (size_t)(pg_size) - 1) / (size_t)(pg_size)), \
+                                PG_STAGING_ALIGNMENT)
 #define PG_RDVZ_STAGING_SIZE(pg_size) \
     ((size_t)((pg_size) - 1) * PG_RDVZ_SLOT_SIZE(pg_size))
 #define PG_REGISTERED_BUFFER_SIZE(pg_size) \
@@ -148,6 +153,8 @@ int post_rendezvous_write(pg_handle_t *pg, const void *buffer, size_t length,
                           size_t remote_offset, uint32_t immediate,
                           uint64_t work_id);
 int poll_eager_completion(pg_handle_t *pg, int receive, struct ibv_wc *wc);
+int poll_completions(pg_handle_t *pg, int receive, struct ibv_wc *wc,
+                     int max_completions);
 void destroy_rdma_resources(pg_handle_t *pg);
 
 size_t pg_datatype_size(DATATYPE datatype);
@@ -168,5 +175,8 @@ int pg_run_rendezvous_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
                                      DATATYPE datatype, OPERATION operation);
 int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
                                  DATATYPE datatype);
+int pg_run_all_reduce(pg_handle_t *pg, const void *sendbuf, void *recvbuf,
+                      int count, DATATYPE datatype, OPERATION operation,
+                      pg_transport_mode_t mode);
 
 #endif /* PG_INTERNAL_H */

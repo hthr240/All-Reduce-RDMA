@@ -15,6 +15,7 @@ static int test_invalid_eager_transport(void)
     if (post_eager_receive(NULL, 1, 0) != -1 ||
         post_eager_send(NULL, &value, sizeof(value), 0, 0) != -1 ||
         poll_eager_completion(NULL, 1, NULL) != -1 ||
+        poll_completions(NULL, 1, NULL, PG_WC_BATCH) != -1 ||
         pg_reduce_scatter(NULL, &value, 1, PG_INT32, PG_SUM, &pg) != -1 ||
         pg_run_eager_all_gather(NULL, &value, 1, PG_INT32) != -1 ||
         pg_all_reduce(NULL, &value, 1, PG_INT32, PG_SUM, &pg) != -1 ||
@@ -22,6 +23,17 @@ static int test_invalid_eager_transport(void)
         pg_all_gather(NULL, &value, 1, PG_INT32, &pg) != -1 ||
         pg_all_gather(&value, NULL, 1, PG_INT32, &pg) != -1) {
         fprintf(stderr, "invalid eager transport arguments were accepted\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int test_receive_pool_capacity(void)
+{
+    if (PG_EAGER_SLOTS != PG_RQ_DEPTH ||
+        PG_RQ_DEPTH <= PG_QP_DEPTH ||
+        PG_CQ_CAPACITY < PG_RQ_DEPTH) {
+        fprintf(stderr, "receive pool cannot cover the send queue\n");
         return -1;
     }
     return 0;
@@ -110,7 +122,9 @@ static int test_eager_work_buffer_limit(void)
     pg.buf = workspace;
     if (pg_run_eager_reduce_scatter(&pg, &dummy, &dummy, too_many,
                                     PG_INT32, PG_SUM) != -1 ||
-        pg_run_eager_all_gather(&pg, &dummy, too_many, PG_INT32) != -1) {
+        pg_run_eager_all_gather(&pg, &dummy, too_many, PG_INT32) != -1 ||
+        pg_run_all_reduce(&pg, &dummy, &dummy, too_many,
+                  PG_INT32, PG_SUM, PG_TRANSPORT_EAGER) != -1) {
         fprintf(stderr, "eager transfer exceeded the work buffer\n");
         return -1;
     }
@@ -134,6 +148,7 @@ static int test_eager_sequence_progression(void)
 int main(void)
 {
     if (test_invalid_eager_transport() != 0 ||
+        test_receive_pool_capacity() != 0 ||
         test_public_chunk_api() != 0 ||
         test_all_gather_schedule() != 0 ||
         test_single_rank_all_reduce() != 0 ||

@@ -311,9 +311,9 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
 {
     pg_handle_t *pg = (pg_handle_t *)pg_handle;
     size_t element_size;
-    int use_rendezvous;
+    pg_transport_mode_t mode;
 
-    if (!pg || !sendbuf || !recvbuf || count < 0 ||
+    if (!pg || count < 0 ||
         pg_validate_reduction(datatype, op) != 0 ||
         pg->size <= 0 || pg->rank < 0 || pg->rank >= pg->size) {
         fprintf(stderr, "Invalid all-reduce arguments\n");
@@ -321,6 +321,10 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
     }
     if (count == 0) {
         return 0;
+    }
+    if (!sendbuf || !recvbuf) {
+        fprintf(stderr, "Invalid all-reduce buffers\n");
+        return -1;
     }
 
     element_size = pg_datatype_size(datatype);
@@ -334,24 +338,11 @@ int pg_all_reduce(void *sendbuf, void *recvbuf, int count, DATATYPE datatype, OP
         return 0;
     }
 
-    use_rendezvous = use_rendezvous_transport(pg, count, element_size);
-    if (use_rendezvous) {
-        if (pg_run_rendezvous_reduce_scatter(pg, sendbuf, recvbuf, count,
-                                             datatype, op) != 0 ||
-            pg_run_rendezvous_all_gather(pg, recvbuf, count, datatype) != 0) {
-            fprintf(stderr, "Rendezvous all-reduce failed\n");
-            return -1;
-        }
-        return 0;
-    }
-
-    if (pg_run_eager_reduce_scatter(pg, sendbuf, recvbuf, count,
-                                    datatype, op) != 0) {
-        fprintf(stderr, "Reduce Scatter stage failed\n");
-        return -1;
-    }
-    if (pg_run_eager_all_gather(pg, recvbuf, count, datatype) != 0) {
-        fprintf(stderr, "All Gather stage failed\n");
+    mode = use_rendezvous_transport(pg, count, element_size) ?
+           PG_TRANSPORT_RDVZ : PG_TRANSPORT_EAGER;
+    if (pg_run_all_reduce(pg, sendbuf, recvbuf, count,
+                          datatype, op, mode) != 0) {
+        fprintf(stderr, "All-reduce failed\n");
         return -1;
     }
     return 0;

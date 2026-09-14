@@ -465,6 +465,8 @@ int bootstrap_ring(pg_handle_t *pg, char **host_list, int host_count)
         pg->bootstrap_base_port + pg->size >= 65536) {
         return -1;
     }
+    srand((unsigned int)time(NULL) ^ (unsigned int)getpid() ^
+          ((unsigned int)pg->rank << 16));
     psn_next = (uint32_t)(rand() & 0x00ffffffu);
     psn_previous = (uint32_t)(rand() & 0x00ffffffu);
     if (metadata_from_qp(pg, pg->qp_send, psn_next, &local_metadata) != 0) {

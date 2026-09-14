@@ -168,16 +168,6 @@ static size_t chunk_segment_count(const pg_handle_t *pg,
                          schedule->segment_size);
 }
 
-static int post_receive(pg_handle_t *pg,
-                        const pg_collective_schedule_t *schedule,
-                        uint64_t work_id)
-{
-    size_t receive_size = schedule->mode == PG_TRANSPORT_EAGER ?
-                          PG_EAGER_BUFFER_SIZE : 0;
-
-    return post_eager_receive(pg, receive_size, work_id);
-}
-
 static int post_segment(pg_handle_t *pg,
                         const pg_collective_schedule_t *schedule,
                         int step, size_t segment)
@@ -236,7 +226,8 @@ static int validate_receive_completion(
     if (completion->status != IBV_WC_SUCCESS ||
         completion->opcode != expected_opcode ||
         completion->imm_data != expected_immediate ||
-        completion->byte_len != expected_bytes) {
+        completion->byte_len != expected_bytes ||
+        completion->wr_id >= PG_EAGER_SLOTS) {
         PG_LOG_ERROR(
             "pg_engine",
             "Invalid receive completion: step=%d segment=%zu status=%s opcode=%d imm=0x%x bytes=%u expected_opcode=%d expected_imm=0x%x expected_bytes=%zu",
@@ -277,7 +268,7 @@ static int process_received_segment(
 
         if (schedule->mode == PG_TRANSPORT_EAGER) {
             source = (const unsigned char *)pg->buf + pg->eager_offset +
-                     (size_t)(completion->wr_id % PG_EAGER_SLOTS) *
+                     (size_t)completion->wr_id *
                          PG_EAGER_BUFFER_SIZE;
         } else {
             source = (const unsigned char *)pg->buf + pg->staging_offset +
@@ -291,7 +282,7 @@ static int process_received_segment(
     if (schedule->mode == PG_TRANSPORT_EAGER && bytes > 0) {
         memcpy(destination,
                (const unsigned char *)pg->buf + pg->eager_offset +
-                   (size_t)(completion->wr_id % PG_EAGER_SLOTS) *
+                   (size_t)completion->wr_id *
                        PG_EAGER_BUFFER_SIZE, bytes);
     }
     return 0;
@@ -299,31 +290,26 @@ static int process_received_segment(
 
 static int send_segment_is_ready(
     const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
-    const size_t *received_segments, int step, size_t segment)
+    int receive_step, size_t receive_segment, int step, size_t segment)
 {
-    int previous_index;
-    int previous_chunk;
-    size_t previous_segment_count;
+    int dependency_step;
 
     if (step == schedule->first_step) {
         return 1;
     }
 
-    previous_index = step - schedule->first_step - 1;
-    if (schedule->pipelined) {
-        return received_segments[previous_index] > segment;
+    dependency_step = step - 1;
+    if (receive_step > dependency_step) {
+        return 1;
     }
-
-    previous_chunk = step_receive_chunk(pg, step - 1);
-    previous_segment_count = chunk_segment_count(pg, schedule,
-                                                 previous_chunk);
-    return previous_segment_count > 0 &&
-           received_segments[previous_index] == previous_segment_count;
+    return schedule->pipelined && receive_step == dependency_step &&
+           receive_segment > segment;
 }
 
 static int post_ready_segments(
     pg_handle_t *pg, const pg_collective_schedule_t *schedule,
-    const size_t *received_segments, int *next_step, size_t *next_segment,
+    int receive_step, size_t receive_segment,
+    int *next_step, size_t *next_segment,
     int *sends_outstanding)
 {
     while (*sends_outstanding < PG_QP_DEPTH &&
@@ -332,7 +318,8 @@ static int post_ready_segments(
         size_t count = chunk_segment_count(pg, schedule, chunk);
 
         if (count == 0 ||
-            !send_segment_is_ready(pg, schedule, received_segments,
+            !send_segment_is_ready(pg, schedule,
+                                   receive_step, receive_segment,
                                    *next_step, *next_segment)) {
             return count == 0 ? -1 : 0;
         }
@@ -349,18 +336,15 @@ static int post_ready_segments(
     return 0;
 }
 
-static int count_expected_receives(
-    const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
-    size_t *total_receives)
+static int validate_schedule_geometry(
+    const pg_handle_t *pg, const pg_collective_schedule_t *schedule)
 {
     int step;
 
-    *total_receives = 0;
     for (step = schedule->first_step; step < schedule->end_step; ++step) {
         int chunk = step_receive_chunk(pg, step);
         int element_offset;
         size_t bytes;
-        size_t count;
 
         if (chunk_geometry(pg, schedule, chunk, &element_offset, &bytes) != 0) {
             return -1;
@@ -370,122 +354,91 @@ static int count_expected_receives(
             step < pg->size - 1 && bytes > pg->staging_slot_size) {
             return -1;
         }
-        count = segment_count(bytes, schedule->segment_size);
-        if (SIZE_MAX - *total_receives < count) {
-            return -1;
-        }
-        *total_receives += count;
     }
-    return 0;
+    return schedule->first_step >= 0 &&
+           schedule->first_step < schedule->end_step ? 0 : -1;
 }
 
 static int run_collective_steps(pg_handle_t *pg,
                                 const pg_collective_schedule_t *schedule)
 {
-    int step_count = schedule->end_step - schedule->first_step;
-    size_t *received_segments;
-    size_t total_receives;
-    size_t posted_receives = 0;
-    size_t completed_receives = 0;
-    size_t receive_window;
     int receive_step = schedule->first_step;
+    size_t receive_segment = 0;
     int next_send_step = schedule->first_step;
     size_t next_send_segment = 0;
     int sends_outstanding = 0;
 
-    received_segments = calloc((size_t)step_count,
-                               sizeof(*received_segments));
-    if (!received_segments ||
-        count_expected_receives(pg, schedule, &total_receives) != 0) {
-        free(received_segments);
+    if (validate_schedule_geometry(pg, schedule) != 0) {
         return -1;
     }
 
-    receive_window = schedule->mode == PG_TRANSPORT_EAGER ?
-                     PG_EAGER_SLOTS : PG_RQ_DEPTH;
-    while (posted_receives < total_receives &&
-           posted_receives < receive_window) {
-        if (post_receive(pg, schedule, posted_receives) != 0) {
-            free(received_segments);
-            return -1;
-        }
-        ++posted_receives;
-    }
-    if (post_ready_segments(pg, schedule, received_segments,
+    if (post_ready_segments(pg, schedule, receive_step, receive_segment,
                             &next_send_step, &next_send_segment,
                             &sends_outstanding) != 0) {
-        free(received_segments);
         return -1;
     }
 
-    while (completed_receives < total_receives ||
+    while (receive_step < schedule->end_step ||
            sends_outstanding > 0 ||
            next_send_step < schedule->end_step) {
-        if (completed_receives < total_receives) {
+        if (receive_step < schedule->end_step) {
             struct ibv_wc completion;
             int count = poll_eager_completion(pg, 1, &completion);
 
             if (count < 0) {
-                free(received_segments);
                 return -1;
             }
             if (count == 1) {
-                int index = receive_step - schedule->first_step;
-                size_t segment = received_segments[index];
                 int chunk = step_receive_chunk(pg, receive_step);
                 size_t expected_segments =
                     chunk_segment_count(pg, schedule, chunk);
 
-                if (expected_segments == 0 || segment >= expected_segments ||
+                if (expected_segments == 0 ||
+                    receive_segment >= expected_segments ||
                     process_received_segment(pg, schedule, &completion,
-                                             receive_step, segment) != 0) {
-                    free(received_segments);
+                                             receive_step,
+                                             receive_segment) != 0 ||
+                    post_eager_receive(pg, PG_EAGER_BUFFER_SIZE,
+                                       completion.wr_id) != 0) {
                     return -1;
                 }
-                ++received_segments[index];
-                ++completed_receives;
-                if (received_segments[index] == expected_segments) {
+                ++receive_segment;
+                if (receive_segment == expected_segments) {
+                    receive_segment = 0;
                     ++receive_step;
-                }
-                if (posted_receives < total_receives) {
-                    if (post_receive(pg, schedule, posted_receives) != 0) {
-                        free(received_segments);
-                        return -1;
-                    }
-                    ++posted_receives;
                 }
             }
         }
 
         if (sends_outstanding > 0) {
-            struct ibv_wc completion;
-            int count = poll_eager_completion(pg, 0, &completion);
+            struct ibv_wc completions[PG_WC_BATCH];
+            int index;
+            int count = poll_completions(pg, 0, completions,
+                                         PG_WC_BATCH);
 
             if (count < 0) {
-                free(received_segments);
                 return -1;
             }
-            if (count == 1) {
-                if (completion.status != IBV_WC_SUCCESS) {
+            for (index = 0; index < count; ++index) {
+                if (completions[index].status != IBV_WC_SUCCESS) {
                     PG_LOG_ERROR("pg_engine",
                                  "Send completion failed: status=%s",
-                                 ibv_wc_status_str(completion.status));
-                    free(received_segments);
+                                 ibv_wc_status_str(
+                                     completions[index].status));
                     return -1;
                 }
-                --sends_outstanding;
             }
+            sends_outstanding -= count;
         }
 
-        if (post_ready_segments(pg, schedule, received_segments,
+        if (post_ready_segments(pg, schedule,
+                                receive_step, receive_segment,
                                 &next_send_step, &next_send_segment,
                                 &sends_outstanding) != 0) {
-            free(received_segments);
             return -1;
         }
     }
 
-    free(received_segments);
     return 0;
 }
 
@@ -517,7 +470,7 @@ static int run_reduce_scatter(pg_handle_t *pg, const void *sendbuf,
     schedule.element_size = pg_datatype_size(datatype);
     schedule.segment_size = mode == PG_TRANSPORT_EAGER ?
                             PG_EAGER_BUFFER_SIZE : PG_RDVZ_SEGMENT_SIZE;
-    schedule.pipelined = mode == PG_TRANSPORT_RDVZ && pg->pipeline_enabled;
+    schedule.pipelined = pg->pipeline_enabled;
     schedule.first_step = 0;
     schedule.end_step = pg->size - 1;
 
@@ -570,7 +523,7 @@ static int run_all_gather(pg_handle_t *pg, void *recvbuf, int count,
     schedule.element_size = pg_datatype_size(datatype);
     schedule.segment_size = mode == PG_TRANSPORT_EAGER ?
                             PG_EAGER_BUFFER_SIZE : PG_RDVZ_SEGMENT_SIZE;
-    schedule.pipelined = mode == PG_TRANSPORT_RDVZ && pg->pipeline_enabled;
+    schedule.pipelined = pg->pipeline_enabled;
     schedule.first_step = pg->size - 1;
     schedule.end_step = 2 * pg->size - 2;
 
@@ -620,4 +573,45 @@ int pg_run_rendezvous_all_gather(pg_handle_t *pg, void *recvbuf, int count,
 {
     return run_all_gather(pg, recvbuf, count, datatype,
                           PG_TRANSPORT_RDVZ);
+}
+
+int pg_run_all_reduce(pg_handle_t *pg, const void *sendbuf, void *recvbuf,
+                      int count, DATATYPE datatype, OPERATION operation,
+                      pg_transport_mode_t mode)
+{
+    pg_collective_schedule_t schedule;
+    size_t total_bytes;
+
+    if (!pg || !pg->is_connected || !pg->buf || !sendbuf || !recvbuf ||
+        count < 0 || pg_validate_reduction(datatype, operation) != 0 ||
+        pg->size < 2 || pg->rank < 0 || pg->rank >= pg->size ||
+        (mode != PG_TRANSPORT_EAGER && mode != PG_TRANSPORT_RDVZ)) {
+        return -1;
+    }
+    if (count == 0) {
+        return 0;
+    }
+
+    schedule.count = count;
+    schedule.datatype = datatype;
+    schedule.operation = operation;
+    schedule.mode = mode;
+    schedule.element_size = pg_datatype_size(datatype);
+    schedule.segment_size = mode == PG_TRANSPORT_EAGER ?
+                            PG_EAGER_BUFFER_SIZE : PG_RDVZ_SEGMENT_SIZE;
+    schedule.pipelined = pg->pipeline_enabled;
+    schedule.first_step = 0;
+    schedule.end_step = 2 * pg->size - 2;
+
+    total_bytes = (size_t)count * schedule.element_size;
+    if (total_bytes > PG_WORK_BUFFER_SIZE) {
+        return -1;
+    }
+    memcpy((unsigned char *)pg->buf + pg->work_offset, sendbuf, total_bytes);
+    if (run_collective_steps(pg, &schedule) != 0) {
+        return -1;
+    }
+    memcpy(recvbuf, (unsigned char *)pg->buf + pg->work_offset, total_bytes);
+    ++pg->collective_sequence;
+    return 0;
 }
