@@ -6,9 +6,7 @@
 #include <infiniband/verbs.h>
 #include <string.h>
 
-#include "pg_common.h"
-#include "pg_log.h"
-#include "pg_verbs.h"
+#include "pg_internal.h"
 
 int find_active_port(struct ibv_context *context, int *port_num)
 {
@@ -36,6 +34,7 @@ int find_active_port(struct ibv_context *context, int *port_num)
 int create_rdma_resources(pg_handle_t *pg)
 {
     struct ibv_device **device_list = NULL;
+    struct ibv_device *device;
     int device_count = 0;
     size_t buffer_size;
 
@@ -57,13 +56,14 @@ int create_rdma_resources(pg_handle_t *pg)
     PG_LOG_INFO("pg_verbs", "Found %d RDMA device(s)", device_count);
 
     /* Device selection is intentionally simple for this first milestone. */
-    pg->device = device_list[0];
-    PG_LOG_DEBUG("pg_verbs", "Selected device: %s", ibv_get_device_name(pg->device));
+    device = device_list[0];
+    PG_LOG_DEBUG("pg_verbs", "Selected device: %s", ibv_get_device_name(device));
 
     /* The context is the process's active handle for using the device. */
-    pg->context = ibv_open_device(pg->device);
+    pg->context = ibv_open_device(device);
     if (!pg->context) {
-        PG_LOG_ERROR("pg_verbs", "Could not open Verbs device %s", ibv_get_device_name(pg->device));
+        PG_LOG_ERROR("pg_verbs", "Could not open Verbs device %s",
+                     ibv_get_device_name(device));
         ibv_free_device_list(device_list);
         return -1;
     }
@@ -125,8 +125,6 @@ int create_rdma_resources(pg_handle_t *pg)
         PG_LOG_ERROR("pg_verbs", "Could not create directional completion queues");
         return -1;
     }
-    pg->cq = pg->send_cq;
-
     /* Create one RC QP for each ring direction. */
     PG_LOG_DEBUG("pg_verbs", "Creating directional reliable-connected queue pairs");
     {
@@ -150,7 +148,6 @@ int create_rdma_resources(pg_handle_t *pg)
             PG_LOG_ERROR("pg_verbs", "Could not create directional queue pairs");
             return -1;
         }
-        pg->qp = pg->qp_send;
         PG_LOG_INFO("pg_verbs", "Queue pairs created: send=0x%x recv=0x%x",
                     pg->qp_send->qp_num, pg->qp_recv->qp_num);
     }

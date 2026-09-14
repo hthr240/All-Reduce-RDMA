@@ -1,9 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Phase 9: benchmark transport configuration. */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

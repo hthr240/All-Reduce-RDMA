@@ -11,10 +11,7 @@
 #include <unistd.h>
 #include <stdint.h>
 
-#include "pg_common.h"
-#include "pg_bootstrap.h"
-#include "pg_log.h"
-#include "pg_verbs.h"
+#include "pg_internal.h"
 
 int validate_host_list(char **host_list, int host_count)
 {

@@ -2,9 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "pg_collective.h"
-#include "pg_log.h"
-#include "pg_verbs.h"
+#include "pg_internal.h"
 
 typedef struct {
     int count;

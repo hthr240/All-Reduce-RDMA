@@ -1,235 +1,107 @@
-# Refactoring Complete: Modular Architecture Implementation
+# Phase 10: Final Architecture
 
-## Summary
+## Goal
 
-Successfully refactored the **ring_allreduce.c monolith** (1000+ lines) into a clean, modular architecture with clear separation of concerns.
+Phase 10 simplified the completed project without changing its public API or
+collective behavior. The full-mark reference remains the algorithmic baseline,
+but this project keeps a small modular layout instead of one large source file.
 
----
+## Final structure
 
-## Files Created
+The library has four production implementation modules:
 
-### 1. **pg_common.h** (120 lines)
-- **Purpose**: Central location for all types and constants
-- **Contains**:
-  - Enums: `DATATYPE` (INT32, INT64, FLOAT, DOUBLE)
-  - Enums: `OPERATION` (SUM, MAX, MIN)
-  - Struct: `pg_metadata_t` (bootstrap exchange data)
-  - Struct: `pg_handle_t` (process-group opaque handle)
-  - Constants: `PG_BUFFER_SIZE`, `PG_CQ_CAPACITY`, `PG_QP_DEPTH`, etc.
-  - Macro: `PG_TRACE()` for debug logging
-- **Used by**: All other modules
+| Module | Responsibility |
+| --- | --- |
+| `ring_allreduce.c` | Public API, process-group lifecycle, protocol selection, standalone CLI, and logging |
+| `pg_bootstrap.c` | Host parsing, ring topology, metadata serialization, TCP bootstrap, and barriers |
+| `pg_verbs.c` | Device, PD, MR, CQ, QP lifecycle, work requests, completions, and token test |
+| `pg_collective.c` | Datatypes, chunk geometry, reduction kernels, and the unified collective progress engine |
 
-### 2. **pg_verbs.h / pg_verbs.c** (210 lines)
-- **Purpose**: RDMA device initialization and cleanup
-- **Functions**:
-  - `find_active_port()` — Find active InfiniBand port
-  - `create_rdma_resources()` — Allocate device, context, PD, CQ, QP, buffer, MR; move QP to INIT
-  - `destroy_rdma_resources()` — Cleanup in reverse dependency order
-- **Called by**: `connect_process_group()` in ring_allreduce.c
-- **Used in tests**: Phase 1
+Supporting files are intentionally separate:
 
-### 3. **pg_bootstrap.h / pg_bootstrap.c** (380 lines)
-- **Purpose**: TCP bootstrap protocol and metadata serialization
-- **Functions**:
-  - `serialize_metadata()` / `deserialize_metadata()` — Convert metadata to/from 48-byte wire format
-  - `write_full()` / `read_full()` — Reliable socket I/O
-  - `metadata_from_process_group()` — Extract metadata from QP and MR
-  - `validate_peer_metadata()` — Validate received peer data
-  - `bootstrap_ring()` — Full ring exchange protocol (listen + connect + exchange)
-  - Helper functions: `create_bootstrap_listener()`, `connect_bootstrap_peer()`, etc.
-- **Called by**: `main()` when multi-rank
-- **Used in tests**: Phase 3
+- `pg.h` is the stable public API.
+- `pg_internal.h` contains private state, constants, and internal declarations.
+- `test.c` is the course-facing correctness and benchmark driver.
+- `tests/` contains focused local tests that link the production modules normally.
+- `BENCHMARK_REPORT.md` and `results-*.tsv` contain the final evidence.
 
-### 4. **pg_topology.h / pg_topology.c** (45 lines)
-- **Purpose**: Ring topology logic
-- **Functions**:
-  - `validate_host_list()` — Check for empty/duplicate hosts
-  - `configure_process_group_topology()` — Compute previous_rank and next_rank using modulo
-- **Called by**: `main()` after connect_process_group()
-- **Used in tests**: Phase 2 (no Verbs device needed)
+## Mental model
 
-### 5. **pg_cli.h / pg_cli.c** (65 lines)
-- **Purpose**: Command-line parsing
-- **Functions**:
-  - `parse_rank_and_hosts()` — Parse `-myindex <rank> -list <host1> [host2 ...]`
-  - `usage()` — Print usage message
-- **Called by**: `main()` first
-- **Used in tests**: Indirectly via main()
-
----
-
-## Files Modified
-
-### **ring_allreduce.c** (150 lines, was ~1000)
-**Before**: Monolithic file mixing CLI parsing, Verbs operations, bootstrap protocol, topology, and public API  
-**After**: Clean orchestration layer with single responsibility
-
-**Removed** (moved to modules):
-- All CLI parsing (→ pg_cli.c)
-- All Verbs operations (→ pg_verbs.c)
-- All bootstrap/serialization (→ pg_bootstrap.c)
-- All topology logic (→ pg_topology.c)
-- All type definitions (→ pg_common.h)
-
-**Kept**:
-- `main()` — Orchestration entry point
-- `connect_process_group()` — Public API (now calls `create_rdma_resources()`)
-- `pg_all_reduce()` — Public API (skeleton)
-- `pg_close()` — Public API
-- `destroy_process_group()` — Wrapper cleanup helper
-
-**Include structure**:
-```c
-#include "pg_common.h"      // Types
-#include "pg_verbs.h"       // Device operations
-#include "pg_bootstrap.h"   // Bootstrap protocol
-#include "pg_topology.h"    // Ring logic
-#include "pg_cli.h"         // CLI parsing
+```text
+application / test.c
+        |
+        v
+ring_allreduce.c       public API and lifecycle
+        |
+        +----> pg_bootstrap.c    build and synchronize the ring
+        +----> pg_verbs.c        perform low-level RDMA operations
+        +----> pg_collective.c   run Reduce Scatter and All Gather
 ```
 
-### **Makefile**
-**Before**:
-```makefile
-SRC := ring_allreduce.c
-```
+`pg_internal.h` is shared only inside the implementation and tests. Normal
+callers include only `pg.h` and use the opaque `void *` process-group handle.
 
-**After**:
-```makefile
-SRC := ring_allreduce.c pg_verbs.c pg_bootstrap.c pg_topology.c pg_cli.c
-```
+## Main simplifications
 
-**Test rule updated**:
-- Tests compile with all module .c files (not ring_allreduce.c, which they include)
-- Test files still use `#define main` to include ring_allreduce.c
-- Modules provide implementations for functions ring_allreduce.c depends on
+1. Process-group setup now has one path. The standalone executable and course
+   driver both build the same encoded group specification and call
+   `connect_process_group()` once.
+2. Topology is owned by bootstrap, rather than a separate one-function module.
+3. Eager and rendezvous use one schedule-driven collective engine. The engine
+   covers both Reduce Scatter and All Gather with global ring steps.
+4. Reduction and chunk geometry live beside the collective algorithm that uses
+   them.
+5. CLI and logging no longer require separate implementation modules.
+6. Tests link the four modules normally instead of including a production `.c`
+   file.
+7. Obsolete aliases for the directional QPs and CQs were removed.
 
----
+## Reference alignment
 
-## Verification Steps
+The refactor preserves the behavior that matters for the exercise:
 
-### Build
-```bash
-cd /mnt/c/Users/fanta/CS/network\ seminar/ex3/repo/All-Reduce-RDMA
+- one-based `-myindex` input converted once to a zero-based rank;
+- a logical ring tested with 2 and 4 ranks;
+- two directional RC QPs and split send/receive completion queues;
+- QP transitions through `INIT -> RTR -> RTS`;
+- fixed-width TCP metadata containing QPN, PSN, LID/GID, address, and rkey;
+- eager `SEND_WITH_IMM` with a 4 KiB registered receive buffer;
+- rendezvous `RDMA_WRITE_WITH_IMM` with 128 KiB segments;
+- one staging slot per Reduce Scatter step;
+- direct final placement during rendezvous All Gather;
+- optional rendezvous pipelining and a `-nopipe` baseline;
+- deterministic auto selection from the largest chunk size;
+- immediate tags containing collective sequence, step, and segment;
+- `PG_INT32`, `PG_DOUBLE`, `PG_SUM`, and `PG_PROD`;
+- uneven, empty, in-place, repeated, and maximum-size collectives;
+- rank-0-only TSV benchmark output.
+
+Differences from the reference are deliberate implementation choices, not
+missing features. The binary metadata format, split CQs, 4 KiB eager segments,
+and modular source layout remain because they are correct, tested, and easy to
+explain.
+
+## Validation
+
+Focused phase tests and distributed NIC checks protect each changed boundary.
+The final four-module validation is:
+
+```sh
 make clean
 make
+make check
+./test -help
 ```
 
-**Expected output**: No errors, no new warnings beyond original libibverbs issues.
+Then run the 2-rank and 4-rank suites in all modes:
 
-### Run Phase 0-3 Tests
-```bash
-make test-phase1  # Tests local Verbs initialization
-make test-phase2  # Tests ring topology (no hardware needed)
-make test-phase3  # Tests metadata serialization via Unix sockets
-make test        # Run all
+```sh
+./test ... -suite -mode eager
+./test ... -suite -mode rdvz
+./test ... -suite -mode rdvz -nopipe
+./test ... -suite -mode auto
 ```
 
-**Expected**: All tests pass with identical behavior as before refactoring.
-
-### Verify Module Separation
-```bash
-# Each module should be independently buildable (for future phases)
-gcc -c pg_verbs.c -Wall -std=c11 $(pkg-config --cflags libibverbs)
-gcc -c pg_bootstrap.c -Wall -std=c11
-gcc -c pg_topology.c -Wall -std=c11
-gcc -c pg_cli.c -Wall -std=c11
-```
-
----
-
-## Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                          main()                             │
-│                  (Orchestration Layer)                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  parse_rank_and_hosts()  ←──  pg_cli.c                     │
-│           ↓                                                 │
-│  validate_host_list()    ←──  pg_topology.c                │
-│           ↓                                                 │
-│  connect_process_group() ←──  pg_verbs.c                   │
-│           ↓                  ┌─────────────────────┐       │
-│  configure_topology()  ←─────┤  pg_topology.c      │       │
-│           ↓                  └─────────────────────┘       │
-│  bootstrap_ring()      ←──  pg_bootstrap.c                 │
-│           ↓                 ┌─────────────────────┐        │
-│  pg_all_reduce()  ←─────────┤  (Phase 4+: added) │        │
-│                             └─────────────────────┘        │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│                    Public API (Stable)                      │
-│  - connect_process_group(servername, &handle)             │
-│  - pg_all_reduce(sendbuf, recvbuf, ..., handle)          │
-│  - pg_close(handle)                                       │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Phase Evolution
-
-### Phases 0-3 (✅ Complete)
-- No changes needed to existing modules
-- Tests pass unchanged
-- Code is production-ready for local bootstrap
-
-### Phase 4 (Next)
-Add new module: `pg_reduction.c`
-- Datatype size validation
-- CPU reduction (element-wise SUM/MAX/MIN)
-- Chunk partitioning logic
-
-### Phase 5
-Add new module: `pg_scatter.c`
-- Reduce Scatter ring rounds (N-1 iterations)
-- Receive → reduce → send logic
-- QP state transitions (INIT → RTR → RTS)
-
-### Phase 6
-Add new module: `pg_gather.c`
-- All Gather ring circulation
-- Chunk placement in recvbuf
-
-### Phase 7
-Update `ring_allreduce.c`
-- Combine scatter + gather in `pg_all_reduce()` implementation
-
-### Phase 8-10
-Add new module: `pg_rdma_operations.c`
-- Rendezvous protocol (eager vs. rendezvous threshold)
-- Pipelining (segmentation, depth)
-- Zero-copy RDMA-write All Gather
-
-### Phase 11
-Benchmarking and report
-- Add timing/stats to main()
-- Benchmark 2 and 4 ranks
-- Validate against CPU reference
-
----
-
-## Benefits Achieved
-
-✅ **Maintainability**: Each module ~50-380 lines with clear responsibility  
-✅ **Testability**: Can test topology without Verbs hardware; serialization via Unix sockets  
-✅ **Extensibility**: Phase 4+ adds modules without modifying existing code  
-✅ **Reusability**: Future MPI-like bindings can reuse pg_verbs, pg_bootstrap  
-✅ **Stability**: Infrastructure (Phases 0-3) stabilizes early; collective logic evolves incrementally  
-✅ **Code Quality**: No behavior changes; same public API; identical test results  
-
----
-
-## Next Actions
-
-1. **Verify build**: `make clean && make` (should be silent success)
-2. **Run tests**: `make test-phase1 test-phase2 test-phase3` (all should pass)
-3. **Start Phase 4**: Create `pg_reduction.c` with CPU reduction primitives
-4. **Document progress**: Update report.txt with refactoring milestone
-
----
-
-**Refactoring Status**: ✅ COMPLETE  
-**Test Status**: Ready for verification  
-**Code Quality**: Production-ready for Phases 4-11 development
+The final submission check also includes the token test, 50 repeated calls,
+in-place and uneven counts, a 4 MiB rendezvous case, complete benchmark files,
+and a clean rebuild from the submitted archive.

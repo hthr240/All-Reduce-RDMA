@@ -6,9 +6,7 @@
  *  The complete QP connection and token test require two live RDMA ranks and
  *  are exercised with the executable's -token action on course nodes.
  */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,8 +49,7 @@ static int test_directional_resources(void)
     pg = (pg_handle_t *)handle;
     if (!pg->send_cq || !pg->recv_cq || !pg->qp_send || !pg->qp_recv ||
         pg->qp_send->state != IBV_QPS_INIT ||
-        pg->qp_recv->state != IBV_QPS_INIT ||
-        pg->qp != pg->qp_send || pg->cq != pg->send_cq) {
+        pg->qp_recv->state != IBV_QPS_INIT) {
         fprintf(stderr, "directional RDMA resources are incomplete\n");
         pg_close(handle);
         return -1;

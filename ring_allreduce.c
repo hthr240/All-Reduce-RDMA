@@ -8,12 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "pg.h"
-#include "pg_common.h"
-#include "pg_log.h"
-#include "pg_verbs.h"
-#include "pg_bootstrap.h"
-#include "pg_collective.h"
+#include "pg_internal.h"
 
 static pg_log_level_t g_log_level = PG_LOG_INFO;
 
@@ -70,6 +65,24 @@ void pg_log_impl(pg_log_level_t level, const char *module, const char *file,
     fflush(stderr);
 }
 
+static void configure_logging(void)
+{
+    const char *level = getenv("PG_LOG_LEVEL");
+
+    if (!level) {
+        return;
+    }
+    if (strcmp(level, "debug") == 0) {
+        pg_log_set_level(PG_LOG_DEBUG);
+    } else if (strcmp(level, "info") == 0) {
+        pg_log_set_level(PG_LOG_INFO);
+    } else if (strcmp(level, "warn") == 0) {
+        pg_log_set_level(PG_LOG_WARN);
+    } else if (strcmp(level, "error") == 0) {
+        pg_log_set_level(PG_LOG_ERROR);
+    }
+}
+
 /*
  * destroy_process_group:
  *  Release every resource that may have been created for a process group.
@@ -98,7 +111,7 @@ static void destroy_process_group(pg_handle_t *pg)
     free(pg);
 }
 
-static int configure_transport_mode(pg_handle_t *pg)
+int configure_transport_mode(pg_handle_t *pg)
 {
     const char *mode;
     const char *no_pipeline;
@@ -186,6 +199,8 @@ int connect_process_group(char *servername, void **pg_handle)
     int rank = 0;
     int host_count = 1;
     int distributed = 0;
+
+    configure_logging();
 
     /* Without this output address there is nowhere to return the new handle. */
     if (!servername || !pg_handle) {

@@ -1,12 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Phase 6: bounded eager collective and public API checks. */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int test_invalid_eager_transport(void)
 {

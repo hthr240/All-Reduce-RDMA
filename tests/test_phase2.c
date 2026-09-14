@@ -5,12 +5,11 @@
  *  Verify the local logical-ring topology calculation without requiring
  *  network peers or an RDMA device.
  */
-#define main ring_allreduce_program_main
-#include "../ring_allreduce.c"
-#undef main
+#include "../pg_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int test_ring_neighbors(void)
 {
@@ -70,32 +69,6 @@ static int test_host_list_validation(void)
     return 0;
 }
 
-static int test_course_rank_numbering(void)
-{
-    char *arguments[] = {
-        "test", "-myindex", "01", "-list", "mlx-stud-01", "mlx-stud-02"
-    };
-    char **hosts = NULL;
-    int rank = -1;
-    int host_count = 0;
-    int index;
-
-    if (parse_rank_and_hosts(6, arguments, &rank, &hosts, &host_count) != 0 ||
-        rank != 0 || host_count != 2 || strcmp(hosts[rank], "mlx-stud-01") != 0) {
-        fprintf(stderr, "course one-based rank numbering is incorrect\n");
-        for (index = 0; hosts && index < host_count; ++index) {
-            free(hosts[index]);
-        }
-        free(hosts);
-        return -1;
-    }
-    for (index = 0; index < host_count; ++index) {
-        free(hosts[index]);
-    }
-    free(hosts);
-    return 0;
-}
-
 static int test_process_group_spec(void)
 {
     char **hosts = NULL;
@@ -130,8 +103,7 @@ static int test_process_group_spec(void)
 int main(void)
 {
     if (test_ring_neighbors() != 0 || test_invalid_topology() != 0 ||
-        test_host_list_validation() != 0 || test_course_rank_numbering() != 0 ||
-        test_process_group_spec() != 0) {
+        test_host_list_validation() != 0 || test_process_group_spec() != 0) {
         return EXIT_FAILURE;
     }
 

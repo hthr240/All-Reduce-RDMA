@@ -18,14 +18,14 @@ all: $(TARGET) $(COURSE_TEST)
 $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(OBJ) $(LDLIBS)
 
-$(COURSE_TEST): test.c pg.h $(SRC)
+$(COURSE_TEST): test.c pg.h pg_internal.h $(SRC)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -DPG_LIBRARY_ONLY -o $@ test.c $(SRC) $(LDLIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
 
-tests/test_phase%: tests/test_phase%.c pg_verbs.c pg_bootstrap.c pg_collective.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $< pg_verbs.c pg_bootstrap.c pg_collective.c $(LDLIBS)
+tests/test_phase%: tests/test_phase%.c pg.h pg_internal.h $(SRC)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -DPG_LIBRARY_ONLY -o $@ $< $(SRC) $(LDLIBS)
 
 check: $(TEST_TARGETS)
 	@set -e; for test_target in $(TEST_TARGETS); do \

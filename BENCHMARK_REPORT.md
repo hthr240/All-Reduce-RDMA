@@ -35,12 +35,11 @@ The code is split by responsibility:
 
 | Module | Responsibility |
 | --- | --- |
-| `ring_allreduce.c` | Public API and protocol selection |
+| `ring_allreduce.c` | Public API, lifecycle, protocol selection, CLI, and logging |
 | `pg_verbs.c` | RDMA resources, QPs, posting, and completion polling |
-| `pg_bootstrap.c` | TCP metadata exchange and barriers |
-| `pg_topology.c` | Ring neighbors |
-| `pg_reduction.c` | Chunk geometry and CPU reduction |
-| `pg_collective.c` | Reduce Scatter, All Gather, and pipelining |
+| `pg_bootstrap.c` | Ring topology, TCP metadata exchange, and barriers |
+| `pg_collective.c` | Chunking, reduction, Reduce Scatter, All Gather, and pipelining |
+| `pg_internal.h` | Private state, constants, and module declarations |
 | `test.c` | Correctness suite and benchmark driver |
 
 ## 3. Ring algorithm
