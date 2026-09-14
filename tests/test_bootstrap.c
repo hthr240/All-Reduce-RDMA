@@ -7,7 +7,8 @@
  * A Unix socket pair provides two connected byte streams locally. It tests the
  * protocol helpers without requiring two course nodes or an RDMA device.
  */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

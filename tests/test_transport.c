@@ -6,7 +6,8 @@
  *  The complete QP connection and token test require two live RDMA ranks and
  *  are exercised with the executable's -token action on course nodes.
  */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

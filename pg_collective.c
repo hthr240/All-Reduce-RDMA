@@ -2,7 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "pg_internal.h"
+#define PG_INTERNAL
+#include "pg.h"
 
 typedef struct {
     int count;

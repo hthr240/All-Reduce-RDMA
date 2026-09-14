@@ -7,7 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "pg_internal.h"
+#define PG_INTERNAL
+#include "pg.h"
 
 int find_active_port(struct ibv_context *context, int *port_num)
 {

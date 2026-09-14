@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Configuration test: environment-driven transport and network knobs. */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

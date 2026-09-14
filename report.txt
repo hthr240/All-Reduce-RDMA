@@ -1,0 +1,72 @@
+Exercise 3 - Ring All-Reduce over RDMA Verbs
+
+Implementation
+
+I implemented a single-threaded process group using a ring of Reliable
+Connected queue pairs. TCP is used only during setup to exchange QP details,
+memory addresses, and keys. Collective data is transferred with Verbs.
+
+The vector is split into one chunk per process. Reduce Scatter uses P-1 ring
+steps to reduce the chunks. All Gather uses another P-1 steps to distribute
+the finished chunks. All Reduce performs both phases in one progress loop.
+
+Eager mode sends 8 KB segments into pre-posted bounce buffers. Rendezvous mode
+uses RDMA_WRITE_WITH_IMM. During All Gather, rendezvous writes each segment
+directly to its final location, avoiding an extra receive-side copy.
+
+Both modes are pipelined. A processed segment can be forwarded while the next
+segment is arriving. Automatic mode uses eager for chunks up to 128 KB and
+rendezvous for larger chunks. This threshold gave the best combined result in
+my 2-node and 4-node measurements.
+
+Correctness
+
+I tested 2 and 4 processes with int32 and double values, sum and product,
+uneven chunk sizes, in-place All Reduce, Reduce Scatter, and All Gather. All
+tests passed in automatic, forced eager, and forced rendezvous modes.
+
+Performance
+
+The benchmark measured double-precision sum from 8 bytes to 4 MB after warm-up.
+
+Mode          Nodes   8-byte latency   4 MB latency   Algorithm BW   Ring bus BW
+Eager           2          4.61 us        2.84 ms        11.81 Gbit/s   11.81 Gbit/s
+Rendezvous      2          4.82 us        2.86 ms        11.75 Gbit/s   11.75 Gbit/s
+Eager           4         13.09 us        3.68 ms         9.11 Gbit/s   13.67 Gbit/s
+Rendezvous      4         13.11 us        3.54 ms         9.49 Gbit/s   14.23 Gbit/s
+
+Ring bus bandwidth counts traffic from both phases:
+
+    bus bandwidth = algorithm bandwidth * 2(P-1)/P
+
+The protocols are close for small messages because remote addresses are shared
+during setup, so rendezvous does not need a handshake for every transfer. At
+4 MB with 4 nodes, rendezvous improves latency from 3.68 ms to 3.54 ms.
+Pipelining reduces 4-node rendezvous latency by about 17% at both 1 MB and 4 MB.
+
+Exercise 2 reached about 32.5 Gbit/s with independent one-way RDMA writes.
+All Reduce is slower because it includes dependent ring steps, CPU reduction,
+completion handling, and input/output copies. The measured 14.23 Gbit/s ring
+bus bandwidth is reasonable for this single-threaded collective.
+
+Usage
+
+Build with:
+
+    make
+
+Run the same host list on every node and change only the one-based index:
+
+    ./test -myindex 01 -list mlx-stud-01 mlx-stud-02
+    ./test -myindex 02 -list mlx-stud-01 mlx-stud-02
+
+For 4 nodes, add mlx-stud-03 and mlx-stud-04 and run indices 01 through 04.
+The command runs the correctness suite by default. Add the same protocol flag
+on every node to force a mode:
+
+    -mode eager
+    -mode rdvz
+
+Run all benchmarks from mlx-stud-01 with:
+
+    python3 run_benchmarks.py --sanity

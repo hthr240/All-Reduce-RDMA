@@ -485,7 +485,7 @@ int main(int argc, char **argv)
         ACTION_TOKEN,
         ACTION_SUITE,
         ACTION_BENCHMARK
-    } action = ACTION_CHECK;
+    } action = ACTION_SUITE;
     char **hosts = NULL;
     char *spec = NULL;
     void *handle = NULL;

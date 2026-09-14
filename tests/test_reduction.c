@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Reduction test: reference-compatible reduction and uneven chunk geometry. */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <math.h>
 #include <stdint.h>

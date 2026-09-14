@@ -5,7 +5,8 @@
  *  Verify the local logical-ring topology calculation without requiring
  *  network peers or an RDMA device.
  */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

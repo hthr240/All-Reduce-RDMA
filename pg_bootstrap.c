@@ -11,7 +11,8 @@
 #include <unistd.h>
 #include <stdint.h>
 
-#include "pg_internal.h"
+#define PG_INTERNAL
+#include "pg.h"
 
 int validate_host_list(char **host_list, int host_count)
 {

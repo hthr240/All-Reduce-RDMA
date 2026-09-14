@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 /* Rendezvous transport test: staging geometry, validation, and size limits. */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

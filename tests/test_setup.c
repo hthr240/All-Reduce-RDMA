@@ -11,7 +11,8 @@
  * same test run on development machines without RDMA hardware while still
  * exercising the full initialization on a course node.
  */
-#include "../pg_internal.h"
+#define PG_INTERNAL
+#include "../pg.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -6,6 +6,7 @@
 !*.h
 !Makefile
 !run_benchmarks.py
+!report.txt
 !results-*.tsv
 !tests/
 tests/*
