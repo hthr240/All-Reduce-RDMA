@@ -289,7 +289,7 @@ static int process_received_segment(
 }
 
 static int send_segment_is_ready(
-    const pg_handle_t *pg, const pg_collective_schedule_t *schedule,
+    const pg_collective_schedule_t *schedule,
     int receive_step, size_t receive_segment, int step, size_t segment)
 {
     int dependency_step;
@@ -318,7 +318,7 @@ static int post_ready_segments(
         size_t count = chunk_segment_count(pg, schedule, chunk);
 
         if (count == 0 ||
-            !send_segment_is_ready(pg, schedule,
+            !send_segment_is_ready(schedule,
                                    receive_step, receive_segment,
                                    *next_step, *next_segment)) {
             return count == 0 ? -1 : 0;

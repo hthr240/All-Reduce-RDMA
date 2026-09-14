@@ -64,7 +64,7 @@ typedef struct pg_handle {
 
 #define PG_WORK_BUFFER_SIZE (4u << 20)
 #define PG_EAGER_BUFFER_SIZE 8192
-#define PG_EAGER_THRESHOLD (16u << 10)
+#define PG_EAGER_THRESHOLD (128u << 10)
 #define PG_RDVZ_SEGMENT_SIZE (128u << 10)
 #define PG_CQ_CAPACITY 256
 #define PG_QP_DEPTH 64
