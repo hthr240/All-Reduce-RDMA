@@ -276,7 +276,9 @@ static int process_received_segment(
         const unsigned char *source;
 
         if (schedule->mode == PG_TRANSPORT_EAGER) {
-            source = (const unsigned char *)pg->buf + pg->eager_offset;
+            source = (const unsigned char *)pg->buf + pg->eager_offset +
+                     (size_t)(completion->wr_id % PG_EAGER_SLOTS) *
+                         PG_EAGER_BUFFER_SIZE;
         } else {
             source = (const unsigned char *)pg->buf + pg->staging_offset +
                      (size_t)step * pg->staging_slot_size + byte_offset;
@@ -288,7 +290,9 @@ static int process_received_segment(
 
     if (schedule->mode == PG_TRANSPORT_EAGER && bytes > 0) {
         memcpy(destination,
-               (const unsigned char *)pg->buf + pg->eager_offset, bytes);
+               (const unsigned char *)pg->buf + pg->eager_offset +
+                   (size_t)(completion->wr_id % PG_EAGER_SLOTS) *
+                       PG_EAGER_BUFFER_SIZE, bytes);
     }
     return 0;
 }
@@ -398,7 +402,7 @@ static int run_collective_steps(pg_handle_t *pg,
     }
 
     receive_window = schedule->mode == PG_TRANSPORT_EAGER ?
-                     1 : PG_QP_DEPTH;
+                     PG_EAGER_SLOTS : PG_RQ_DEPTH;
     while (posted_receives < total_receives &&
            posted_receives < receive_window) {
         if (post_receive(pg, schedule, posted_receives) != 0) {

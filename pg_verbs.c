@@ -155,7 +155,7 @@ int create_rdma_resources(pg_handle_t *pg)
             .recv_cq = pg->recv_cq,
             .cap = {
                 .max_send_wr = PG_QP_DEPTH,
-                .max_recv_wr = PG_QP_DEPTH,
+                .max_recv_wr = PG_RQ_DEPTH,
                 .max_send_sge = 1,
                 .max_recv_sge = 1,
                 .max_inline_data = 0
@@ -221,7 +221,8 @@ int connect_rdma_qp(pg_handle_t *pg, struct ibv_qp *qp,
     attr.dest_qp_num = remote->qpn;
     attr.rq_psn = remote->psn;
     attr.max_dest_rd_atomic = 1;
-    attr.min_rnr_timer = 12;
+    /* 0.01 ms backoff; with infinite rnr_retry a boundary race costs ~10 us. */
+    attr.min_rnr_timer = 1;
     attr.ah_attr.is_global = remote->gid.global.interface_id != 0;
     attr.ah_attr.dlid = remote->lid;
     attr.ah_attr.sl = 0;
@@ -354,7 +355,10 @@ int post_eager_receive(pg_handle_t *pg, size_t length, uint64_t work_id)
     }
 
     memset(&sge, 0, sizeof(sge));
-    sge.addr = (uintptr_t)((unsigned char *)pg->buf + pg->eager_offset);
+    /* FIFO RQ consumption maps the k-th posted receive to bounce slot k%N. */
+    sge.addr = (uintptr_t)((unsigned char *)pg->buf + pg->eager_offset +
+                           (size_t)(work_id % PG_EAGER_SLOTS) *
+                               PG_EAGER_BUFFER_SIZE);
     sge.length = PG_EAGER_BUFFER_SIZE;
     sge.lkey = pg->mr->lkey;
     memset(&wr, 0, sizeof(wr));

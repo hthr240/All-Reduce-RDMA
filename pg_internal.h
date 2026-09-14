@@ -62,11 +62,15 @@ typedef struct pg_handle {
 } pg_handle_t;
 
 #define PG_WORK_BUFFER_SIZE (4u << 20)
-#define PG_EAGER_BUFFER_SIZE 4096
+/* Receive-side bounce ring: slots x segment; 16 posted slots always cover
+ * the sender's depth of 8, so RNR NAKs only happen at collective edges. */
+#define PG_EAGER_BUFFER_SIZE 8192
+#define PG_EAGER_SLOTS 16
 #define PG_EAGER_THRESHOLD (16u << 10)
 #define PG_RDVZ_SEGMENT_SIZE (128u << 10)
-#define PG_CQ_CAPACITY 16
+#define PG_CQ_CAPACITY 128
 #define PG_QP_DEPTH 8
+#define PG_RQ_DEPTH 64
 #define PG_METADATA_WIRE_SIZE 48
 #define PG_BOOTSTRAP_BASE_PORT 18515
 #define PG_BOOTSTRAP_RETRIES 600
@@ -81,7 +85,7 @@ typedef struct pg_handle {
     ((size_t)((pg_size) - 1) * PG_RDVZ_SLOT_SIZE(pg_size))
 #define PG_REGISTERED_BUFFER_SIZE(pg_size) \
     ((size_t)PG_WORK_BUFFER_SIZE + PG_RDVZ_STAGING_SIZE(pg_size) + \
-     (size_t)PG_EAGER_BUFFER_SIZE)
+     (size_t)PG_EAGER_SLOTS * (size_t)PG_EAGER_BUFFER_SIZE)
 
 #define PG_EAGER_IMM(seq, round, segment) \
     ((((uint32_t)(seq) & 0xffu) << 24) | \
